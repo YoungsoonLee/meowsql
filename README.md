@@ -263,8 +263,9 @@ A full `CONTRIBUTING.md` will land with v0.1.
 
 ## License
 
-TBD (likely Apache-2.0 for the CLI; SaaS components separate). Pinning this
-before the first tagged release.
+Licensed under the [Apache License 2.0](./LICENSE). The open-source CLI in
+this repository is Apache-2.0; future hosted SaaS components will live in a
+separate repository under a commercial license.
 
 ---
 
