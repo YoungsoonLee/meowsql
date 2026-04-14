@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: meowsql-e2e-postgres
+    environment:
+      POSTGRES_USER: meowsql
+      POSTGRES_PASSWORD: meowsql
+      POSTGRES_DB: meowsql
+    ports:
+      - "55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U meowsql -d meowsql"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
