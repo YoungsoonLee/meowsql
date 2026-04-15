@@ -5,29 +5,9 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/YoungsoonLee/meowsql/internal/target"
 	"github.com/jackc/pgx/v5"
 )
-
-type TableInfo struct {
-	Schema        string       `json:"schema"`
-	Name          string       `json:"name"`
-	EstimatedRows int64        `json:"estimated_rows"`
-	Columns       []ColumnInfo `json:"columns"`
-	Indexes       []IndexInfo  `json:"indexes"`
-}
-
-type ColumnInfo struct {
-	Name     string `json:"name"`
-	Type     string `json:"type"`
-	Nullable bool   `json:"nullable"`
-}
-
-type IndexInfo struct {
-	Name       string `json:"name"`
-	Definition string `json:"definition"`
-	IsUnique   bool   `json:"is_unique"`
-	IsPrimary  bool   `json:"is_primary"`
-}
 
 const colQuery = `
 SELECT a.attname,
@@ -59,8 +39,8 @@ WHERE n.nspname = $1 AND c.relname = $2`
 // DescribeTables returns schema + indexes + row-count estimates for each given
 // name. Names may be bare ("users") or schema-qualified ("auth.users"); bare
 // names are resolved against the "public" schema.
-func (c *Collector) DescribeTables(ctx context.Context, names []string) ([]TableInfo, error) {
-	out := make([]TableInfo, 0, len(names))
+func (c *Collector) DescribeTables(ctx context.Context, names []string) ([]target.TableInfo, error) {
+	out := make([]target.TableInfo, 0, len(names))
 	for _, n := range names {
 		schema, table := splitName(n)
 		info, err := c.describeOne(ctx, schema, table)
@@ -75,21 +55,21 @@ func (c *Collector) DescribeTables(ctx context.Context, names []string) ([]Table
 }
 
 func splitName(n string) (string, string) {
-	if i := strings.Index(n, "."); i >= 0 {
-		return n[:i], n[i+1:]
+	if schema, name, ok := strings.Cut(n, "."); ok {
+		return schema, name
 	}
 	return "public", n
 }
 
-func (c *Collector) describeOne(ctx context.Context, schema, table string) (*TableInfo, error) {
-	info := &TableInfo{Schema: schema, Name: table}
+func (c *Collector) describeOne(ctx context.Context, schema, table string) (*target.TableInfo, error) {
+	info := &target.TableInfo{Schema: schema, Name: table}
 
 	rows, err := c.conn.Query(ctx, colQuery, schema, table)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
-		var col ColumnInfo
+		var col target.ColumnInfo
 		if err := rows.Scan(&col.Name, &col.Type, &col.Nullable); err != nil {
 			rows.Close()
 			return nil, err
@@ -102,7 +82,6 @@ func (c *Collector) describeOne(ctx context.Context, schema, table string) (*Tab
 	}
 
 	if len(info.Columns) == 0 {
-		// Not a real table, or not visible under the current role.
 		return nil, nil
 	}
 
@@ -111,7 +90,7 @@ func (c *Collector) describeOne(ctx context.Context, schema, table string) (*Tab
 		return nil, err
 	}
 	for rows.Next() {
-		var idx IndexInfo
+		var idx target.IndexInfo
 		if err := rows.Scan(&idx.Name, &idx.Definition, &idx.IsUnique, &idx.IsPrimary); err != nil {
 			rows.Close()
 			return nil, err

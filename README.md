@@ -77,9 +77,15 @@ export ANTHROPIC_API_KEY=sk-ant-...
 ## 30-Second Example
 
 ```bash
+# PostgreSQL
 meowsql analyze \
   --dsn "postgres://user:pass@localhost:5432/shop" \
   --query "SELECT * FROM orders WHERE lower(email) = 'a@b.com'"
+
+# MySQL (URL form, or the native go-sql-driver DSN user:pass@tcp(host:port)/db)
+meowsql analyze \
+  --dsn "mysql://user:pass@localhost:3306/shop" \
+  --query "SELECT * FROM orders WHERE LOWER(email) = 'a@b.com'"
 ```
 
 Other ways to feed it:
@@ -100,6 +106,7 @@ Flags you will actually use:
 | Flag | What it does |
 |------|-------------|
 | `--dsn` | Database connection string (PostgreSQL or MySQL, auto-detected). |
+| `--dialect` | Force `postgres` or `mysql` when the DSN is ambiguous. |
 | `--query` / `--file` / stdin | Where the slow SQL comes from. Pick one. |
 | `--analyze` | Run `EXPLAIN (ANALYZE, BUFFERS)` — actually executes the query. Off by default. |
 | `--schema-only` | Skip `EXPLAIN`; use schema + stats only. Safe on prod read-replicas. |
@@ -148,7 +155,7 @@ turns that into a product.
       rolled-back transaction
 - [x] Claude-powered diagnosis, index suggestion, and rewrite (JSON output)
 - [x] Pretty terminal output + `--json`
-- [ ] `meowsql analyze` for MySQL (`vitess` parser + `go-sql-driver`)
+- [x] `meowsql analyze` for MySQL (`pingcap/tidb` parser + `go-sql-driver`)
 - [ ] Homebrew tap + GitHub Releases binaries
 - [ ] Asciinema demo in the README
 

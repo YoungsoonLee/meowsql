@@ -9,13 +9,16 @@ import (
 	"strings"
 
 	"github.com/YoungsoonLee/meowsql/internal/agent"
+	"github.com/YoungsoonLee/meowsql/internal/db/mysql"
 	"github.com/YoungsoonLee/meowsql/internal/db/postgres"
 	"github.com/YoungsoonLee/meowsql/internal/report"
+	"github.com/YoungsoonLee/meowsql/internal/target"
 	"github.com/spf13/cobra"
 )
 
 type analyzeOpts struct {
 	dsn        string
+	dialect    string
 	query      string
 	file       string
 	runAnalyze bool
@@ -24,14 +27,22 @@ type analyzeOpts struct {
 	model      string
 }
 
+type collector interface {
+	Collect(ctx context.Context, sql string, opts target.CollectOptions) (*target.ContextPack, error)
+	Close() error
+}
+
 func newAnalyzeCmd() *cobra.Command {
 	var o analyzeOpts
 	cmd := &cobra.Command{
 		Use:   "analyze",
 		Short: "Diagnose a slow SQL query and suggest fixes",
-		Long: `Analyze connects to your database, parses the given SQL with the real
-PostgreSQL parser, collects the schema and EXPLAIN plan for referenced tables,
-and asks Claude to propose indexes and rewrites — grounded in that real context.
+		Long: `Analyze connects to your database, parses the given SQL, collects the schema
+and EXPLAIN plan for referenced tables, and asks Claude to propose indexes and
+rewrites — grounded in that real context.
+
+Dialect is inferred from the DSN (postgres://, postgresql://, mysql://, or
+user:pass@tcp(host)/db) and can be overridden with --dialect.
 
 SQL input (pick one):
   --query "SELECT ..."     inline
@@ -39,18 +50,19 @@ SQL input (pick one):
   (stdin)                  piped in
 
 Safety:
-  --analyze runs EXPLAIN (ANALYZE, BUFFERS) inside a transaction that is
-  always rolled back, so writes do not persist. Still, treat --analyze as
-  "executes the query" and avoid it on production primaries.`,
+  --analyze runs EXPLAIN (ANALYZE) inside a transaction that is always rolled
+  back, so writes do not persist. Still, treat --analyze as "executes the
+  query" and avoid it on production primaries.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runAnalyze(cmd.Context(), cmd.InOrStdin(), cmd.OutOrStdout(), o)
 		},
 	}
 	f := cmd.Flags()
-	f.StringVar(&o.dsn, "dsn", "", "PostgreSQL connection string (required)")
+	f.StringVar(&o.dsn, "dsn", "", "database connection string (required)")
+	f.StringVar(&o.dialect, "dialect", "", "postgres|mysql (overrides DSN inference)")
 	f.StringVar(&o.query, "query", "", "inline SQL to analyze")
 	f.StringVar(&o.file, "file", "", "path to SQL file")
-	f.BoolVar(&o.runAnalyze, "analyze", false, "run EXPLAIN (ANALYZE, BUFFERS) inside a rolled-back transaction")
+	f.BoolVar(&o.runAnalyze, "analyze", false, "run EXPLAIN ANALYZE inside a rolled-back transaction")
 	f.BoolVar(&o.schemaOnly, "schema-only", false, "skip EXPLAIN; use schema + stats only")
 	f.BoolVar(&o.jsonOut, "json", false, "emit JSON instead of human-readable text")
 	f.StringVar(&o.model, "model", "claude-haiku-4-5-20251001", "Anthropic model id")
@@ -73,13 +85,18 @@ func runAnalyze(ctx context.Context, in io.Reader, out io.Writer, o analyzeOpts)
 		return errors.New("ANTHROPIC_API_KEY is not set")
 	}
 
-	col, err := postgres.Open(ctx, o.dsn)
+	dialect, err := resolveDialect(o.dialect, o.dsn)
+	if err != nil {
+		return err
+	}
+
+	col, validate, err := openCollector(ctx, dialect, o.dsn)
 	if err != nil {
 		return fmt.Errorf("connect: %w", err)
 	}
 	defer col.Close()
 
-	pack, err := col.Collect(ctx, sql, postgres.CollectOptions{
+	pack, err := col.Collect(ctx, sql, target.CollectOptions{
 		RunAnalyze: o.runAnalyze,
 		SchemaOnly: o.schemaOnly,
 	})
@@ -88,9 +105,10 @@ func runAnalyze(ctx context.Context, in io.Reader, out io.Writer, o analyzeOpts)
 	}
 
 	result, err := agent.Analyze(ctx, agent.Request{
-		APIKey:  apiKey,
-		Model:   o.model,
-		Context: pack,
+		APIKey:   apiKey,
+		Model:    o.model,
+		Context:  pack,
+		Validate: validate,
 	})
 	if err != nil {
 		return fmt.Errorf("agent: %w", err)
@@ -100,6 +118,44 @@ func runAnalyze(ctx context.Context, in io.Reader, out io.Writer, o analyzeOpts)
 		return report.WriteJSON(out, pack, result)
 	}
 	return report.WriteText(out, pack, result)
+}
+
+func resolveDialect(override, dsn string) (string, error) {
+	if override != "" {
+		switch override {
+		case "postgres", "postgresql":
+			return "postgres", nil
+		case "mysql":
+			return "mysql", nil
+		default:
+			return "", fmt.Errorf("unknown dialect %q (want postgres|mysql)", override)
+		}
+	}
+	switch {
+	case strings.HasPrefix(dsn, "postgres://"), strings.HasPrefix(dsn, "postgresql://"):
+		return "postgres", nil
+	case strings.HasPrefix(dsn, "mysql://"), strings.Contains(dsn, "@tcp("):
+		return "mysql", nil
+	}
+	return "", errors.New("cannot infer dialect from DSN; pass --dialect postgres|mysql")
+}
+
+func openCollector(ctx context.Context, dialect, dsn string) (collector, agent.Validator, error) {
+	switch dialect {
+	case "postgres":
+		c, err := postgres.Open(ctx, dsn)
+		if err != nil {
+			return nil, nil, err
+		}
+		return c, postgres.ValidateOnly, nil
+	case "mysql":
+		c, err := mysql.Open(ctx, dsn)
+		if err != nil {
+			return nil, nil, err
+		}
+		return c, mysql.ValidateOnly, nil
+	}
+	return nil, nil, fmt.Errorf("unsupported dialect %q", dialect)
 }
 
 func readSQL(in io.Reader, o analyzeOpts) (string, error) {

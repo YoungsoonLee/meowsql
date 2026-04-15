@@ -6,13 +6,20 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/YoungsoonLee/meowsql/internal/db/postgres"
+	"github.com/YoungsoonLee/meowsql/internal/target"
 )
 
+// Validator checks that a candidate SQL string parses as valid SQL for the
+// target dialect. Returns nil if valid. The CLI wires this from the active
+// collector (postgres.ValidateSQL or mysql.ValidateSQL), so the agent stays
+// dialect-agnostic.
+type Validator func(sql string) error
+
 type Request struct {
-	APIKey  string
-	Model   string
-	Context *postgres.ContextPack
+	APIKey   string
+	Model    string
+	Context  *target.ContextPack
+	Validate Validator
 }
 
 type Result struct {
@@ -51,7 +58,7 @@ func Analyze(ctx context.Context, req Request) (*Result, error) {
 	if err := json.Unmarshal([]byte(text), &out); err != nil {
 		return nil, fmt.Errorf("model did not return valid JSON: %w\nresponse:\n%s", err, text)
 	}
-	dropInvalidRewrites(&out, req.Context.SQL)
+	dropInvalidRewrites(&out, req.Context.SQL, req.Validate)
 	return &out, nil
 }
 
@@ -59,7 +66,7 @@ func Analyze(ctx context.Context, req Request) (*Result, error) {
 // or a rewrite that is identical to the input. Both have hit us in practice.
 // Invalid rewrites are dropped (never shown to the user) and a caveat is added
 // so the user knows filtering happened.
-func dropInvalidRewrites(r *Result, originalSQL string) {
+func dropInvalidRewrites(r *Result, originalSQL string, validate Validator) {
 	if len(r.Rewrites) == 0 {
 		return
 	}
@@ -67,9 +74,11 @@ func dropInvalidRewrites(r *Result, originalSQL string) {
 	kept := make([]Rewrite, 0, len(r.Rewrites))
 	var invalid, identical int
 	for _, rw := range r.Rewrites {
-		if _, err := postgres.ValidateSQL(rw.SQL); err != nil {
-			invalid++
-			continue
+		if validate != nil {
+			if err := validate(rw.SQL); err != nil {
+				invalid++
+				continue
+			}
 		}
 		if strings.EqualFold(strings.Join(strings.Fields(rw.SQL), " "), original) {
 			identical++

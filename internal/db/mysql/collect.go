@@ -1,4 +1,4 @@
-package postgres
+package mysql
 
 import (
 	"context"
@@ -6,9 +6,6 @@ import (
 	"github.com/YoungsoonLee/meowsql/internal/target"
 )
 
-// Collect gathers every piece of grounding context the agent needs: version,
-// validated SQL + fingerprint, EXPLAIN plan (unless SchemaOnly), and the
-// schema/indexes/stats for every referenced table.
 func (c *Collector) Collect(ctx context.Context, sql string, opts target.CollectOptions) (*target.ContextPack, error) {
 	fp, err := ValidateSQL(sql)
 	if err != nil {
@@ -18,7 +15,7 @@ func (c *Collector) Collect(ctx context.Context, sql string, opts target.Collect
 	version, _ := c.serverVersion(ctx)
 
 	pack := &target.ContextPack{
-		Dialect:     "postgres",
+		Dialect:     "mysql",
 		Version:     version,
 		SQL:         sql,
 		Fingerprint: fp,

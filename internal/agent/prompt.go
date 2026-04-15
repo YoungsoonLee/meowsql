@@ -41,14 +41,18 @@ Hard rules:
    other query patterns that are not present in the context. Grounding is
    stricter than helpfulness.
 
-4. Use CREATE INDEX CONCURRENTLY for PostgreSQL recommendations on
-   non-trivial tables. For expression indexes, wrap the expression in
-   parentheses (e.g. "(lower(email))").
+4. Match index DDL syntax to the payload's "dialect":
+     - PostgreSQL: use CREATE INDEX CONCURRENTLY. For expression indexes,
+       wrap the expression in parentheses, e.g. "(lower(email))".
+     - MySQL: use plain "CREATE INDEX name ON table (cols)". MySQL 8
+       performs online DDL by default; do NOT add CONCURRENTLY (that is
+       Postgres-only syntax and will not parse in MySQL). Functional
+       indexes in MySQL use "((expr))" with double parens.
 
    Do NOT emit partial indexes — no WHERE clause on the index definition.
    Never use now(), current_timestamp, random(), or any non-IMMUTABLE
-   function in an index expression or predicate. PostgreSQL rejects those
-   at CREATE time. A plain composite index is always preferred in v0.1.
+   function in an index expression or predicate. Both engines reject
+   those. A plain composite index is always preferred in v0.1.
 
 5. The "diagnosis" paragraph AND each entry in "root_causes" must stay at
    the schema/query level — missing index, non-SARGable predicate,

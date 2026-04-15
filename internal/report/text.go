@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/YoungsoonLee/meowsql/internal/agent"
-	"github.com/YoungsoonLee/meowsql/internal/db/postgres"
+	"github.com/YoungsoonLee/meowsql/internal/target"
 	"github.com/fatih/color"
 )
 
@@ -17,12 +17,12 @@ var (
 	code    = color.New(color.FgGreen).SprintFunc()
 )
 
-func WriteText(w io.Writer, pack *postgres.ContextPack, r *agent.Result) error {
+func WriteText(w io.Writer, pack *target.ContextPack, r *agent.Result) error {
 	version := pack.Version
 	if version == "" {
 		version = "unknown"
 	}
-	fmt.Fprintf(w, "%s %s\n\n", header("🐾 MeowSQL"), dim(fmt.Sprintf("PostgreSQL %s", version)))
+	fmt.Fprintf(w, "%s %s\n\n", header("🐾 MeowSQL"), dim(fmt.Sprintf("%s %s", dialectLabel(pack.Dialect), version)))
 
 	fmt.Fprintln(w, section("Diagnosis"))
 	fmt.Fprintln(w, indent(r.Diagnosis, "  "))
@@ -67,6 +67,17 @@ func WriteText(w io.Writer, pack *postgres.ContextPack, r *agent.Result) error {
 		}
 	}
 	return nil
+}
+
+func dialectLabel(d string) string {
+	switch d {
+	case "postgres":
+		return "PostgreSQL"
+	case "mysql":
+		return "MySQL"
+	default:
+		return d
+	}
 }
 
 func indent(s, pad string) string {

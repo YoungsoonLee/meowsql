@@ -15,6 +15,12 @@ func ValidateSQL(sql string) (string, error) {
 	return pgquery.Fingerprint(sql)
 }
 
+// ValidateOnly matches the agent.Validator signature for CLI wiring.
+func ValidateOnly(sql string) error {
+	_, err := ValidateSQL(sql)
+	return err
+}
+
 // parseTableNames walks the parse tree for every RangeVar and returns
 // schema-qualified names when the schema is present. Used as a fallback when
 // an EXPLAIN plan is unavailable (e.g. schema-only mode).

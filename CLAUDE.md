@@ -5,8 +5,8 @@ Guidance for Claude Code (and other AI coding agents) working in this repo.
 ## What this is
 
 MeowSQL is an open-source CLI that analyzes a slow SQL query against a real
-PostgreSQL (and, later, MySQL) database and returns a grounded diagnosis,
-index suggestion, and rewrite. The goal is a narrow, viral developer tool
+PostgreSQL or MySQL database and returns a grounded diagnosis, index
+suggestion, and rewrite. The goal is a narrow, viral developer tool
 ("paste query, get 10x speedup") on the path to a SaaS monitoring product.
 
 Long-form product context — goals, non-goals, exit thesis — lives in
@@ -17,20 +17,39 @@ Long-form product context — goals, non-goals, exit thesis — lives in
 ```
 cmd/meowsql/            thin main — wires signals + root cobra command
 internal/cli/           cobra commands. root.go exposes NewRoot;
-                        analyze.go owns the end-to-end flow
-internal/db/postgres/   everything database-side, kept in one package
-                          conn.go     pgx connection + server_version
-                          parse.go    pg_query_go wrappers (Validate, walk)
-                          explain.go  EXPLAIN (FORMAT JSON), --analyze in tx
-                          schema.go   pg_catalog: columns, indexes, reltuples
-                          collect.go  orchestrates the above into ContextPack
-internal/agent/         Claude integration
-                          prompt.go     system prompt (strict JSON contract)
-                          anthropic.go  plain net/http client, no SDK
-                          agent.go      Analyze(): marshal pack → call → decode
+                        analyze.go owns the end-to-end flow and the
+                        DSN-prefix → dialect dispatch (postgres vs mysql)
+internal/target/        dialect-agnostic types shared by the collectors and
+                        the agent/report layers (ContextPack, TableInfo,
+                        ColumnInfo, IndexInfo, CollectOptions)
+internal/db/postgres/   conn.go     pgx connection + server_version
+                        parse.go    pg_query_go wrappers (Validate, walk)
+                        explain.go  EXPLAIN (FORMAT JSON), --analyze in tx
+                        schema.go   pg_catalog: columns, indexes, reltuples
+                        collect.go  orchestrates the above into ContextPack
+internal/db/mysql/      conn.go     database/sql + go-sql-driver, DSN
+                                    translator (mysql:// → user:pass@tcp(..))
+                        parse.go    pingcap/tidb parser — ValidateSQL +
+                                    TableName AST visitor
+                        explain.go  EXPLAIN FORMAT=JSON; EXPLAIN ANALYZE
+                                    inside a rolled-back tx, text wrapped
+                                    in a JSON envelope for the agent
+                        schema.go   information_schema: columns, statistics,
+                                    table_rows; synthesizes CREATE INDEX
+                                    strings because MySQL has no indexdef
+                        collect.go  orchestrates into the shared ContextPack
+internal/agent/         prompt.go     system prompt (strict JSON contract,
+                                      dialect-aware DDL rules)
+                        anthropic.go  plain net/http client, no SDK
+                        agent.go      Analyze(); Request.Validate is a
+                                      dialect-supplied callback used to drop
+                                      un-parseable or identical-to-input
+                                      rewrites before returning
 internal/report/        text.go pretty terminal output (fatih/color);
                         json.go machine-readable envelope
-testdata/examples/      sample slow queries
+testdata/examples/      sample slow queries (PG + MySQL variants)
+testdata/seed/          PostgreSQL demo: schema + 100k users + 500k orders
+testdata/seed-mysql/    MySQL 8 demo: same shape, recursive-CTE generator
 ```
 
 ### The pipeline
@@ -38,26 +57,35 @@ testdata/examples/      sample slow queries
 `analyze.go` drives one linear flow:
 
 1. Read SQL (`--query` / `--file` / stdin).
-2. `postgres.Open(dsn)` → `pgx.Conn`.
-3. `Collector.Collect(sql, opts)` returns a `*postgres.ContextPack` with
+2. Resolve dialect from `--dialect` or DSN prefix (`postgres://`,
+   `postgresql://`, `mysql://`, or `@tcp(...)`).
+3. Open the dialect's `Collector` (postgres or mysql) and pick its
+   `ValidateOnly` callback for the agent.
+4. `Collector.Collect(sql, opts)` returns a `*target.ContextPack` with
    version, validated SQL, EXPLAIN plan (optional), and per-table schema.
-4. `agent.Analyze(ctx, Request{APIKey, Model, Context})` sends the pack to
-   Claude and decodes strict JSON into `agent.Result`.
-5. `report.WriteText` / `WriteJSON` emits the output.
+5. `agent.Analyze(ctx, Request{APIKey, Model, Context, Validate})` sends
+   the pack to Claude and decodes strict JSON into `agent.Result`.
+6. `report.WriteText` / `WriteJSON` emits the output.
 
 ### Design rules worth repeating
 
 - **No hallucinated schema.** The agent only sees columns/indexes that
-  `pg_catalog` actually returned. The system prompt in `prompt.go` forbids
-  inventing identifiers — keep it strict if you edit it.
+  `pg_catalog` / `information_schema` actually returned. The system prompt
+  in `prompt.go` forbids inventing identifiers — keep it strict if you
+  edit it.
 - **`--analyze` must always run inside a transaction that is rolled back.**
-  See `Collector.Explain`. Do not remove the `defer tx.Rollback`.
+  See `Collector.Explain` in both dialects. Do not remove the
+  `defer tx.Rollback`.
 - **Pre-fetch, don't tool-loop.** v0.1 sends one prompt with the full
   context. A true Anthropic tool-use loop (`get_schema`, `get_explain`,
   `test_index`) is the v0.2 upgrade path.
-- **One package per dialect.** `internal/db/postgres/`. When MySQL arrives,
-  add `internal/db/mysql/` and introduce a shared `ContextPack` type in a
-  new `internal/target` package — not before.
+- **One package per dialect; types live in `internal/target`.** The CLI,
+  agent, and report packages must never import `internal/db/postgres` or
+  `internal/db/mysql` directly for types — only for `Open` and
+  `ValidateOnly`. A third dialect (if ever) slots in the same way.
+- **Dialect-aware DDL in the prompt.** Rule 4 tells the model to use
+  `CREATE INDEX CONCURRENTLY` for Postgres and plain `CREATE INDEX` for
+  MySQL. If you add a new dialect, extend that rule in the same shape.
 - **No SDK for Anthropic.** `internal/agent/anthropic.go` is ~80 lines of
   `net/http`. This avoids SDK-version churn and keeps the dep surface tiny.
   Revisit only if we need streaming or tool-use.
@@ -74,12 +102,18 @@ make tidy
 Environment:
 
 - `ANTHROPIC_API_KEY` — required.
-- PostgreSQL DSN — pass via `--dsn`. Local examples usually use
-  `postgres://user:pass@localhost:5432/dbname?sslmode=disable`.
+- DSN — pass via `--dsn`. Examples:
+  - Postgres: `postgres://user:pass@localhost:5432/dbname?sslmode=disable`
+  - MySQL (URL): `mysql://user:pass@localhost:3306/dbname`
+  - MySQL (go-sql-driver native): `user:pass@tcp(localhost:3306)/dbname`
 
 `pg_query_go` uses cgo. Builds need a C toolchain. We pin v6 because v5 fails
 to compile on current macOS SDKs (duplicate `strchrnul` declaration). Do not
 downgrade.
+
+`pingcap/tidb/pkg/parser` is pure Go and covers MySQL 8 (CTEs, window
+functions, JSON). We rejected `dolthub/vitess` (broken transitive go.mod in
+current releases) and `xwb1989/sqlparser` (no CTE/window support).
 
 ## Coding conventions
 
