@@ -1,0 +1,90 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.goos }}-${{ matrix.goarch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            goos: linux
+            goarch: amd64
+          - runner: ubuntu-22.04-arm
+            goos: linux
+            goarch: arm64
+          - runner: macos-15
+            goos: darwin
+            goarch: arm64
+          - runner: macos-13
+            goos: darwin
+            goarch: amd64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install C toolchain (Linux)
+        if: matrix.goos == 'linux'
+        run: sudo apt-get install -y gcc
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "1"
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          LDFLAGS="-s -w -X main.version=${VERSION}"
+          go build -ldflags "${LDFLAGS}" -o meowsql ./cmd/meowsql
+
+      - name: Package
+        run: |
+          ASSET="meowsql_${{ matrix.goos }}_${{ matrix.goarch }}"
+          tar -czf "${ASSET}.tar.gz" meowsql
+          echo "ASSET=${ASSET}" >> "$GITHUB_ENV"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ASSET }}
+          path: ${{ env.ASSET }}.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Compute checksums
+        run: |
+          cd dist
+          find . -name "*.tar.gz" -exec mv {} . \;
+          find . -maxdepth 1 -name "*.tar.gz" | sort | xargs sha256sum > checksums.txt
+          cat checksums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/checksums.txt
+          generate_release_notes: true

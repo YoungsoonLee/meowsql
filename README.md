@@ -9,6 +9,8 @@ not hallucinated guesses.
 It is built for the workflow you already have: a slow query, a connection
 string, and five minutes before your next standup.
 
+![meowsql demo](demo/demo.gif)
+
 ```bash
 $ meowsql analyze --dsn "$DATABASE_URL" --file slow.sql
 
@@ -52,19 +54,38 @@ MeowSQL is deliberately narrow:
 
 ## Install
 
+### Homebrew (macOS + Linux)
+
 ```bash
-# Build from source (requires Go 1.23+ and a C toolchain — pg_query_go uses cgo)
+brew tap YoungsoonLee/meowsql
+brew install meowsql
+```
+
+### Pre-built binaries
+
+Download from [GitHub Releases](https://github.com/YoungsoonLee/meowsql/releases).
+Builds are available for macOS (arm64/amd64) and Linux (amd64/arm64).
+
+```bash
+# Example — replace version and platform as needed
+curl -L https://github.com/YoungsoonLee/meowsql/releases/download/v0.1.0/meowsql_darwin_arm64.tar.gz \
+  | tar -xz
+sudo mv meowsql /usr/local/bin/
+```
+
+### Build from source
+
+Requires Go 1.23+ and a C toolchain (`xcode-select --install` on macOS).
+
+```bash
 git clone https://github.com/YoungsoonLee/meowsql.git
 cd meowsql
 make build
 ./bin/meowsql --help
 
-# Or via `go install` (also needs cgo enabled)
+# Or via go install
 CGO_ENABLED=1 go install github.com/YoungsoonLee/meowsql/cmd/meowsql@latest
 ```
-
-> Release binaries and a Homebrew tap land with v0.1. Until then, build
-> from source as above.
 
 Set your Anthropic API key:
 
@@ -156,8 +177,8 @@ turns that into a product.
 - [x] Claude-powered diagnosis, index suggestion, and rewrite (JSON output)
 - [x] Pretty terminal output + `--json`
 - [x] `meowsql analyze` for MySQL (`pingcap/tidb` parser + `go-sql-driver`)
-- [ ] Homebrew tap + GitHub Releases binaries
-- [ ] Asciinema demo in the README
+- [x] Homebrew tap + GitHub Releases binaries
+- [x] Asciinema demo in the README
 
 ### Phase 2 — Developer workflow (v0.2 – v0.3)
 
