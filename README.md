@@ -122,7 +122,7 @@ pbpaste | meowsql analyze --dsn "$DATABASE_URL"
 meowsql analyze --dsn "$DATABASE_URL" --file slow.sql --json
 ```
 
-Flags you will actually use:
+### `analyze` flags
 
 | Flag | What it does |
 |------|-------------|
@@ -133,6 +133,52 @@ Flags you will actually use:
 | `--schema-only` | Skip `EXPLAIN`; use schema + stats only. Safe on prod read-replicas. |
 | `--json` | Machine-readable output. |
 | `--model` | Override the Claude model. Defaults to a fast/cheap one. |
+
+---
+
+## `meowsql watch` — auto-surface slow queries
+
+Don't have a specific query to paste? `watch` reads slow-query telemetry
+directly from the database and analyzes the top-N worst offenders
+automatically.
+
+| Database | Source |
+|----------|--------|
+| PostgreSQL | `pg_stat_statements` (needs `CREATE EXTENSION IF NOT EXISTS pg_stat_statements`) |
+| MySQL 8 | `performance_schema.events_statements_summary_by_digest` (on by default) |
+
+```bash
+# Analyze the 5 slowest queries seen at least 10 times
+meowsql watch --dsn "$DATABASE_URL"
+
+# Show top 10, ignore one-off queries
+meowsql watch --dsn "$DATABASE_URL" --top 10 --min-calls 5
+
+# MySQL — same flags
+meowsql watch --dsn "mysql://user:pass@localhost:3306/shop"
+
+# JSON output (great for piping into jq or CI dashboards)
+meowsql watch --dsn "$DATABASE_URL" --json
+```
+
+### `watch` flags
+
+| Flag | What it does |
+|------|-------------|
+| `--dsn` | Database connection string (required). |
+| `--top` | Number of slowest queries to analyze (default 5). |
+| `--min-calls` | Skip queries seen fewer than N times — filters out one-off noise (default 10). |
+| `--dialect` | Force `postgres` or `mysql` when the DSN is ambiguous. |
+| `--json` | Machine-readable output per query. |
+| `--model` | Override the Claude model. |
+
+> **Note — PostgreSQL:** `pg_stat_statements` must be loaded before server start:
+> add `shared_preload_libraries = 'pg_stat_statements'` to `postgresql.conf`, restart,
+> then `CREATE EXTENSION IF NOT EXISTS pg_stat_statements;` once per database.
+> The Docker Compose file in this repo already sets this up.
+
+> **Note — MySQL:** The watch user needs `SELECT` on `performance_schema`:
+> `GRANT SELECT ON performance_schema.* TO 'youruser'@'%';`
 
 ---
 
