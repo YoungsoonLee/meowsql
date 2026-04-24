@@ -8,8 +8,13 @@ package target
 import "encoding/json"
 
 type CollectOptions struct {
-	RunAnalyze bool
-	SchemaOnly bool
+	RunAnalyze   bool
+	SchemaOnly   bool
+	// LenientParse skips strict SQL validation and falls back to a regex-based
+	// table-name extractor. Use for parameterized/normalized queries from
+	// pg_stat_statements or performance_schema where the stored text may not
+	// parse cleanly (e.g., ? placeholders, SQL_TSI_DAY tokens).
+	LenientParse bool
 }
 
 type ContextPack struct {

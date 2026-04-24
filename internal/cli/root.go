@@ -11,5 +11,6 @@ func NewRoot(version string) *cobra.Command {
 		SilenceErrors: false,
 	}
 	cmd.AddCommand(newAnalyzeCmd())
+	cmd.AddCommand(newWatchCmd())
 	return cmd
 }

@@ -5,6 +5,8 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
+	"regexp"
+	"strings"
 
 	"github.com/pingcap/tidb/pkg/parser"
 	"github.com/pingcap/tidb/pkg/parser/ast"
@@ -77,3 +79,25 @@ func (v *tableVisitor) Enter(n ast.Node) (ast.Node, bool) {
 }
 
 func (v *tableVisitor) Leave(n ast.Node) (ast.Node, bool) { return n, true }
+
+// extractTableNamesRegex is a best-effort fallback used when the SQL text is
+// too mangled to parse (e.g., performance_schema DIGEST_TEXT with ? tokens).
+// It looks for the word after FROM and JOIN keywords, stripping backticks.
+var reTableRef = regexp.MustCompile(`(?i)(?:FROM|JOIN)\s+` + "`?" + `(\w+)` + "`?")
+
+func extractTableNamesRegex(sql string) []string {
+	matches := reTableRef.FindAllStringSubmatch(sql, -1)
+	seen := map[string]struct{}{}
+	var out []string
+	for _, m := range matches {
+		name := strings.ToLower(m[1])
+		if name == "" {
+			continue
+		}
+		if _, dup := seen[name]; !dup {
+			seen[name] = struct{}{}
+			out = append(out, m[1])
+		}
+	}
+	return out
+}

@@ -182,7 +182,7 @@ turns that into a product.
 
 ### Phase 2 — Developer workflow (v0.2 – v0.3)
 
-- [ ] `meowsql watch` — read `pg_stat_statements` / `performance_schema`,
+- [x] `meowsql watch` — read `pg_stat_statements` / `performance_schema`,
       surface the top-N most expensive queries, auto-analyze each
 - [ ] GitHub Action: comment on PRs when a migration or query changes a plan
       for the worse

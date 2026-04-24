@@ -1,3 +1,7 @@
+-- Grant performance_schema access so `meowsql watch` works for this user.
+GRANT SELECT ON performance_schema.* TO 'meowsql'@'%';
+FLUSH PRIVILEGES;
+
 -- Intentionally under-indexed schema, matching the PostgreSQL demo.
 -- The gaps (no index on orders.email, no composite on customer_id + created_at)
 -- are the whole point — the agent must surface them.

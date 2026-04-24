@@ -2,14 +2,25 @@ package mysql
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
 
 	"github.com/YoungsoonLee/meowsql/internal/target"
 )
 
 func (c *Collector) Collect(ctx context.Context, sql string, opts target.CollectOptions) (*target.ContextPack, error) {
-	fp, err := ValidateSQL(sql)
-	if err != nil {
-		return nil, err
+	var fp string
+	if opts.LenientParse {
+		// Parameterized queries from performance_schema may not parse cleanly.
+		// Use a raw sha1 of the text as the fingerprint instead.
+		sum := sha1.Sum([]byte(sql))
+		fp = hex.EncodeToString(sum[:])
+	} else {
+		var err error
+		fp, err = ValidateSQL(sql)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	version, _ := c.serverVersion(ctx)
@@ -34,9 +45,13 @@ func (c *Collector) Collect(ctx context.Context, sql string, opts target.Collect
 	}
 
 	if len(tableNames) == 0 {
-		if names, err := parseTableNames(sql); err == nil {
-			tableNames = names
+		names, err := parseTableNames(sql)
+		if err != nil && opts.LenientParse {
+			names = extractTableNamesRegex(sql)
+		} else if err != nil {
+			// non-lenient: best-effort, ignore error
 		}
+		tableNames = names
 	}
 
 	tables, err := c.DescribeTables(ctx, tableNames)

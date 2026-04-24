@@ -10,9 +10,15 @@ import (
 // validated SQL + fingerprint, EXPLAIN plan (unless SchemaOnly), and the
 // schema/indexes/stats for every referenced table.
 func (c *Collector) Collect(ctx context.Context, sql string, opts target.CollectOptions) (*target.ContextPack, error) {
-	fp, err := ValidateSQL(sql)
-	if err != nil {
-		return nil, err
+	var fp string
+	if opts.LenientParse {
+		fp, _ = ValidateSQL(sql) // best-effort; $N placeholders still parse in pg
+	} else {
+		var err error
+		fp, err = ValidateSQL(sql)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	version, _ := c.serverVersion(ctx)
