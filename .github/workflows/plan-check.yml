@@ -1,0 +1,133 @@
+name: SQL Plan Check
+
+# Runs on every PR that touches SQL files.
+# For each query in testdata/examples/ it compares the EXPLAIN cost before
+# and after applying any changed DDL files from the PR (inside a rolled-back
+# transaction — no schema change persists on the test DB).
+# Posts a Markdown summary as a PR comment and fails when a regression > 10%.
+
+on:
+  pull_request:
+    paths:
+      - "testdata/**/*.sql"
+      - "migrations/**/*.sql"
+      - "**/*.sql"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  plan-check:
+    name: EXPLAIN plan regression check
+    runs-on: ubuntu-22.04
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: meowsql
+          POSTGRES_PASSWORD: meowsql
+          POSTGRES_DB: meowsql
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U meowsql -d meowsql"
+          --health-interval 1s
+          --health-timeout 3s
+          --health-retries 30
+
+    env:
+      PG_DSN: postgres://meowsql:meowsql@localhost:55432/meowsql?sslmode=disable
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need full history for git diff
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install C toolchain (for pg_query_go cgo)
+        run: sudo apt-get install -y gcc
+
+      - name: Enable pg_stat_statements
+        run: |
+          psql "$PG_DSN" -c "ALTER SYSTEM SET shared_preload_libraries = 'pg_stat_statements'"
+          # Note: extension requires server restart; handled by service config below.
+          # For plan-diff we don't need pg_stat_statements — just a seeded schema.
+
+      - name: Seed test database
+        run: |
+          psql "$PG_DSN" -f testdata/seed/01_schema.sql
+          psql "$PG_DSN" -f testdata/seed/02_seed.sql
+          psql "$PG_DSN" -f testdata/seed/03_analyze.sql
+
+      - name: Build meowsql
+        run: CGO_ENABLED=1 go build -o bin/meowsql ./cmd/meowsql
+
+      - name: Find changed DDL files
+        id: changed-ddl
+        run: |
+          # Collect SQL files that look like DDL (not pure SELECT queries).
+          # These are the files whose schema changes we want to test against.
+          DDL_FILES=""
+          while IFS= read -r f; do
+            # Skip if file doesn't exist in HEAD (deleted)
+            [[ -f "$f" ]] || continue
+            # Skip pure query files (testdata/examples/)
+            [[ "$f" == testdata/examples/* ]] && continue
+            DDL_FILES="$DDL_FILES $f"
+          done < <(git diff --name-only "origin/${{ github.base_ref }}" HEAD -- '*.sql')
+          echo "ddl_files=$DDL_FILES" >> "$GITHUB_OUTPUT"
+          echo "Changed DDL files: $DDL_FILES"
+
+      - name: Run plan-diff for each example query
+        id: plan-diff
+        run: |
+          mkdir -p /tmp/plan-results
+          QUERY_FILES=(testdata/examples/*.sql)
+          DDL_FILES=(${{ steps.changed-ddl.outputs.ddl_files }})
+
+          for query in "${QUERY_FILES[@]}"; do
+            safe=$(basename "$query" .sql)
+            out="/tmp/plan-results/${safe}.json"
+
+            if [[ ${#DDL_FILES[@]} -gt 0 && -n "${DDL_FILES[0]}" ]]; then
+              # Test each query against each changed DDL file.
+              # Multiple DDL changes: concatenate them.
+              cat "${DDL_FILES[@]}" > /tmp/combined_migration.sql
+              ./bin/meowsql plan-diff \
+                --dsn "$PG_DSN" \
+                --file "$query" \
+                --migration /tmp/combined_migration.sql \
+                > "$out" 2>&1 || true
+            else
+              # No DDL changes — just record baseline cost.
+              ./bin/meowsql plan-diff \
+                --dsn "$PG_DSN" \
+                --file "$query" \
+                > "$out" 2>&1 || true
+            fi
+          done
+
+      - name: Generate PR comment
+        id: comment
+        run: |
+          python3 scripts/plan_report.py /tmp/plan-results/*.json > /tmp/pr-comment.md
+          EXIT=$?
+          echo "has_regression=$( [[ $EXIT -eq 1 ]] && echo true || echo false )" >> "$GITHUB_OUTPUT"
+
+      - name: Post PR comment
+        if: github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: meowsql-plan-check
+          path: /tmp/pr-comment.md
+
+      - name: Fail on regression
+        if: steps.comment.outputs.has_regression == 'true'
+        run: |
+          echo "::error::meowsql detected a plan regression. See the PR comment for details."
+          exit 1

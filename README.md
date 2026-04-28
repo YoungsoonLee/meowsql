@@ -230,7 +230,7 @@ turns that into a product.
 
 - [x] `meowsql watch` — read `pg_stat_statements` / `performance_schema`,
       surface the top-N most expensive queries, auto-analyze each
-- [ ] GitHub Action: comment on PRs when a migration or query changes a plan
+- [x] GitHub Action: comment on PRs when a migration or query changes a plan
       for the worse
 - [ ] VS Code extension: inline "optimize this query" action
 - [ ] Query cache so repeated analyses are free
