@@ -182,6 +182,78 @@ meowsql watch --dsn "$DATABASE_URL" --json
 
 ---
 
+## `meowsql plan-diff` — catch plan regressions in CI
+
+`plan-diff` compares the EXPLAIN cost of a query **before and after** a DDL
+migration, without permanently changing your schema. It uses PostgreSQL's
+transactional DDL: the migration is applied inside a `BEGIN` / `ROLLBACK`
+block, so the database state is always restored.
+
+```bash
+# Compare a query's plan before and after a migration
+meowsql plan-diff \
+  --dsn "postgres://user:pass@localhost:5432/mydb" \
+  --file queries/slow_orders.sql \
+  --migration migrations/0042_drop_email_index.sql
+
+# Fail with exit code 1 if cost increases more than 10% (for CI)
+meowsql plan-diff \
+  --dsn "$DATABASE_URL" \
+  --file queries/slow_orders.sql \
+  --migration migrations/0042_drop_email_index.sql \
+  --exit-code
+
+# Just record baseline cost (no migration)
+meowsql plan-diff --dsn "$DATABASE_URL" --file queries/slow_orders.sql
+```
+
+Example output:
+
+```json
+{
+  "query_file": "queries/slow_orders.sql",
+  "migration_file": "migrations/0042_drop_email_index.sql",
+  "before": { "cost": 28.1,    "plan_type": "Index Scan" },
+  "after":  { "cost": 9393.7,  "plan_type": "Seq Scan"   },
+  "pct_change": 33377,
+  "regression": true
+}
+```
+
+### GitHub Action
+
+The included `.github/workflows/plan-check.yml` runs automatically on every
+PR that touches a `.sql` file. It:
+
+1. Starts a PostgreSQL test container and seeds it
+2. Runs `meowsql plan-diff` for every query in `testdata/examples/` against
+   the combined DDL changes in the PR (applied inside a rolled-back transaction)
+3. Posts a sticky PR comment with a before/after cost table
+4. Fails the check if any query regressed by more than 10%
+
+Example PR comment:
+
+| Query | Before | After | Change | Plan (after) |
+|-------|--------|-------|--------|--------------|
+| `slow_orders.sql` | 28.1 | 9.4k | ❌ +33377% | Seq Scan |
+| `user_lookup.sql` | 1.0k | 1.0k | ✅ — | Index Scan |
+
+To use it in your own repo, copy `.github/workflows/plan-check.yml` and put
+your tracked queries in `testdata/examples/`, migrations in `migrations/` or
+`testdata/seed/`.
+
+### `plan-diff` flags
+
+| Flag | What it does |
+|------|-------------|
+| `--dsn` | PostgreSQL connection string (required). |
+| `--file` | SQL query file to evaluate (required). |
+| `--migration` | DDL file to apply inside a rolled-back transaction. |
+| `--threshold` | Regression threshold in percent (default 10). |
+| `--exit-code` | Exit 1 when a regression is detected — for CI pipelines. |
+
+---
+
 ## How It Works
 
 ```
