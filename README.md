@@ -254,6 +254,47 @@ your tracked queries in `testdata/examples/`, migrations in `migrations/` or
 
 ---
 
+## VS Code Extension
+
+The `vscode-meowsql` extension adds an inline **"🐾 Optimize with MeowSQL"** CodeLens
+above every SQL statement in `.sql` files. Click it and the extension runs
+`meowsql analyze` in the background and shows the diagnosis, index suggestion,
+and rewritten query in a side panel — no terminal required.
+
+### Install
+
+```bash
+# From the vscode-meowsql/ directory in this repo:
+cd vscode-meowsql
+npm install
+npm run package          # produces meowsql-0.1.0.vsix
+code --install-extension meowsql-0.1.0.vsix
+```
+
+> The extension will be published to the VS Code Marketplace once the CLI
+> reaches v0.1.0 stable. Until then, install from source as above.
+
+### Usage
+
+1. Open any `.sql` file.
+2. Click **🐾 Optimize with MeowSQL** above a query — or right-click a
+   selection and choose **MeowSQL: Optimize Selected SQL**.
+3. Enter your database DSN when prompted (or set it in settings to skip the
+   prompt).
+4. Results appear in a side panel: diagnosis, suggested index DDL, rewritten
+   query, and estimated speedup.
+
+### Settings
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `meowsql.dsn` | `""` | DSN to use without prompting each time. |
+| `meowsql.binaryPath` | `"meowsql"` | Path to the binary (must be on `PATH`). |
+| `meowsql.model` | `""` | Claude model override. |
+| `meowsql.anthropicApiKey` | `""` | API key override (defaults to env var). |
+
+---
+
 ## How It Works
 
 ```
@@ -304,7 +345,7 @@ turns that into a product.
       surface the top-N most expensive queries, auto-analyze each
 - [x] GitHub Action: comment on PRs when a migration or query changes a plan
       for the worse
-- [ ] VS Code extension: inline "optimize this query" action
+- [x] VS Code extension: inline "optimize this query" action
 - [ ] Query cache so repeated analyses are free
 - [ ] `meowsql bench` — before/after timing harness
 
@@ -351,6 +392,11 @@ internal/db/postgres/   connect, parse (pg_query_go), EXPLAIN, schema, stats
 internal/agent/         Claude prompt + HTTP client, JSON result decoding
 internal/report/        pretty terminal + JSON renderers
 testdata/examples/      sample slow queries used in demos
+vscode-meowsql/         VS Code extension (TypeScript)
+  src/extension.ts      activation, command registration
+  src/codelens.ts       CodeLens provider — detects SQL statements
+  src/runner.ts         spawns meowsql binary, parses JSON output
+  src/panel.ts          WebviewPanel renderer for results
 ```
 
 ## Development

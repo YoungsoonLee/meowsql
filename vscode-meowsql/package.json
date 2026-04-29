@@ -1,0 +1,100 @@
+{
+  "name": "meowsql",
+  "displayName": "MeowSQL",
+  "description": "Inline SQL query optimizer powered by Claude AI — paste a slow query, get a faster one.",
+  "version": "0.1.0",
+  "publisher": "YoungsoonLee",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/YoungsoonLee/meowsql"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "Linters"
+  ],
+  "keywords": [
+    "sql",
+    "postgresql",
+    "mysql",
+    "performance",
+    "query optimizer"
+  ],
+  "icon": "media/icon.png",
+  "activationEvents": [
+    "onLanguage:sql",
+    "onLanguage:pgsql",
+    "onLanguage:mysql"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "meowsql.optimizeQuery",
+        "title": "MeowSQL: Optimize This Query",
+        "icon": "$(zap)"
+      },
+      {
+        "command": "meowsql.optimizeSelection",
+        "title": "MeowSQL: Optimize Selected SQL"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "meowsql.optimizeSelection",
+          "when": "editorHasSelection && (resourceLangId == sql || resourceLangId == pgsql || resourceLangId == mysql)",
+          "group": "1_modification"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "MeowSQL",
+      "properties": {
+        "meowsql.dsn": {
+          "type": "string",
+          "default": "",
+          "description": "Database connection string (e.g. postgres://user:pass@localhost:5432/mydb). Leave blank to be prompted each time.",
+          "scope": "resource"
+        },
+        "meowsql.binaryPath": {
+          "type": "string",
+          "default": "meowsql",
+          "description": "Path to the meowsql binary. Defaults to 'meowsql' (must be on PATH).",
+          "scope": "machine"
+        },
+        "meowsql.model": {
+          "type": "string",
+          "default": "",
+          "description": "Claude model override (e.g. claude-haiku-4-5-20251001). Leave blank to use meowsql's default.",
+          "scope": "resource"
+        },
+        "meowsql.anthropicApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Anthropic API key. If blank, meowsql reads ANTHROPIC_API_KEY from the environment.",
+          "scope": "machine"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "eslint": "^8.57.0",
+    "typescript": "^5.4.0",
+    "@vscode/vsce": "^2.24.0"
+  }
+}
