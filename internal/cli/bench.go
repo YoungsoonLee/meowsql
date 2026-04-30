@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"slices"
 	"strings"
 	"time"
 
@@ -30,16 +29,6 @@ type benchOpts struct {
 	jsonOut       bool
 }
 
-// dmlKeywords are SQL statement types that modify data.
-var dmlKeywords = []string{"insert", "update", "delete", "truncate", "replace", "merge"}
-
-func isDML(sql string) bool {
-	fields := strings.Fields(strings.TrimSpace(sql))
-	if len(fields) == 0 {
-		return false
-	}
-	return slices.Contains(dmlKeywords, strings.ToLower(fields[0]))
-}
 
 // BenchReport is the machine-readable output of bench.
 type BenchReport struct {

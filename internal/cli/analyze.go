@@ -15,6 +15,7 @@ import (
 	"github.com/YoungsoonLee/meowsql/internal/db/postgres"
 	"github.com/YoungsoonLee/meowsql/internal/report"
 	"github.com/YoungsoonLee/meowsql/internal/target"
+	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
 
@@ -29,6 +30,7 @@ type analyzeOpts struct {
 	model      string
 	noCache    bool
 	cacheTTL   time.Duration
+	timeout    time.Duration
 }
 
 type collector interface {
@@ -72,6 +74,7 @@ Safety:
 	f.StringVar(&o.model, "model", "claude-haiku-4-5-20251001", "Anthropic model id")
 	f.BoolVar(&o.noCache, "no-cache", false, "skip cache lookup and do not write a new entry")
 	f.DurationVar(&o.cacheTTL, "cache-ttl", 24*time.Hour, "how long a cached result remains valid")
+	f.DurationVar(&o.timeout, "timeout", 60*time.Second, "overall query timeout for EXPLAIN and schema collection (0 = no limit)")
 	_ = cmd.MarkFlagRequired("dsn")
 	return cmd
 }
@@ -84,6 +87,21 @@ func runAnalyze(ctx context.Context, in io.Reader, out io.Writer, o analyzeOpts)
 	sql, err := readSQL(in, o)
 	if err != nil {
 		return err
+	}
+
+	// Warn when --analyze will actually execute a DML query (rolled back, but runs).
+	if o.runAnalyze && isDML(sql) && !o.jsonOut {
+		dim := color.New(color.FgHiBlack).SprintFunc()
+		fmt.Fprintf(out, "%s\n\n",
+			dim("Note: --analyze will execute this DML query inside a rolled-back transaction. "+
+				"The statement runs for real (to produce EXPLAIN ANALYZE output) but no data is committed."),
+		)
+	}
+
+	if o.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, o.timeout)
+		defer cancel()
 	}
 
 	apiKey := strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY"))
@@ -164,6 +182,8 @@ func openCollector(ctx context.Context, dialect, dsn string) (collector, agent.V
 		if err != nil {
 			return nil, nil, err
 		}
+		// Best-effort: prevent schema queries from blocking behind long-held locks.
+		_ = c.ApplySafetySettings(ctx, 5*time.Second)
 		return c, postgres.ValidateOnly, nil
 	case "mysql":
 		c, err := mysql.Open(ctx, dsn)

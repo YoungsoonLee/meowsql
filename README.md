@@ -52,6 +52,40 @@ MeowSQL is deliberately narrow:
 
 ---
 
+## Safe to run on production
+
+Every MeowSQL command is designed to be read-only or explicitly roll back any
+writes. You can point it at a live database without fear.
+
+| Protection | `analyze` | `analyze --analyze` | `watch` | `plan-diff` | `bench` |
+|--|:--:|:--:|:--:|:--:|:--:|
+| Query never executes (EXPLAIN only) | ✅ | — | ✅ | ✅ | — |
+| DML wrapped in `BEGIN` / `ROLLBACK` | — | ✅ always | — | — | ✅ always |
+| DML guard — requires `--allow-dml` | — | ⚠️ warning | — | — | ✅ blocked |
+| Statement timeout (`--timeout`) | ✅ 60s | ✅ 60s | ✅ 60s | ✅ 60s | ✅ 30s |
+| Lock timeout (PostgreSQL, 5 s) | ✅ | ✅ | ✅ | ✅ | ✅ per run |
+
+**Query rollback** — `analyze --analyze` runs `EXPLAIN ANALYZE` inside a
+`BEGIN` / `ROLLBACK` transaction. `bench` wraps every individual execution the
+same way. `UPDATE`, `DELETE`, and `INSERT` run for timing or plan purposes but
+are **never committed** to the database.
+
+**Statement timeout** — Every command accepts `--timeout` (default 60 s for
+analysis commands, 30 s for bench). When the limit is hit, the database cancels
+the query so it never blocks other sessions.  
+PostgreSQL: `SET LOCAL statement_timeout`. MySQL bench: `MAX_EXECUTION_TIME`
+optimizer hint + Go context deadline.
+
+**Lock timeout** (PostgreSQL) — `SET lock_timeout = '5s'` is applied on every
+PostgreSQL connection immediately after opening. Schema and EXPLAIN queries
+never wait more than 5 seconds for a table lock held by another session.
+
+**DML guard** (`bench` only) — `UPDATE` / `DELETE` / `INSERT` / `TRUNCATE`
+queries are blocked unless you pass `--allow-dml`. Even then, every run is
+rolled back. For `analyze --analyze`, a notice is printed automatically.
+
+---
+
 ## Install
 
 ### Homebrew (macOS + Linux)
@@ -271,31 +305,13 @@ your tracked queries in `testdata/examples/`, migrations in `migrations/` or
 query** and measures wall-clock latency, giving you concrete before/after
 numbers to put in a PR or incident report.
 
-**Safe to run on production.** Every individual query execution — `SELECT`,
-`UPDATE`, `DELETE`, `INSERT` — is wrapped in its own `BEGIN` / `ROLLBACK`
-transaction. Results are **never committed**. You can point `bench` at a live
-database without fear of corrupting data.
+Every execution is wrapped in `BEGIN` / `ROLLBACK` — see [Safe to run on
+production](#safe-to-run-on-production) for the full safety story.
 
 | | PostgreSQL | MySQL |
 |--|--|--|
-| Query execution | `BEGIN` → run → `ROLLBACK` per iteration | `BEGIN` → run → `ROLLBACK` per iteration |
-| DML side effects | None — always rolled back | None — always rolled back |
 | Index DDL | Applied in outer `BEGIN` / `ROLLBACK` — never persists | Created for real, then `DROP INDEX` after bench |
-| Index cleanup failure | N/A | Error message names the index to drop manually |
-| Statement timeout | `SET LOCAL statement_timeout` per run | `MAX_EXECUTION_TIME` hint + context deadline |
-| Lock timeout | `SET LOCAL lock_timeout = '5s'` per run | Context deadline |
-
-**Three layers of protection:**
-
-1. **DML guard** — `UPDATE`/`DELETE`/`INSERT`/`TRUNCATE` queries are blocked by default.  
-   Pass `--allow-dml` to explicitly opt in. You'll still see the rollback confirmation note.
-
-2. **Statement timeout** (`--timeout 30s`, default) — A runaway query is cancelled after N seconds,  
-   preventing it from blocking the database. PostgreSQL uses `SET LOCAL statement_timeout`;  
-   MySQL injects a `MAX_EXECUTION_TIME` optimizer hint into `SELECT` queries.
-
-3. **Lock timeout** (PostgreSQL only) — `SET LOCAL lock_timeout = '5s'` per run prevents the  
-   bench from waiting forever when another session holds a conflicting lock.
+| Index cleanup failure | N/A | Error names the index to drop manually |
 
 ```bash
 # PostgreSQL — baseline only

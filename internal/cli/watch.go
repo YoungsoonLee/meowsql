@@ -27,6 +27,7 @@ type watchOpts struct {
 	model    string
 	noCache  bool
 	cacheTTL time.Duration
+	timeout  time.Duration
 }
 
 // watchStatement is the shared type returned by both dialect collectors.
@@ -65,6 +66,7 @@ Requires ANTHROPIC_API_KEY.`,
 	f.StringVar(&o.model, "model", "claude-haiku-4-5-20251001", "Anthropic model id")
 	f.BoolVar(&o.noCache, "no-cache", false, "skip cache lookup and do not write a new entry")
 	f.DurationVar(&o.cacheTTL, "cache-ttl", 24*time.Hour, "how long a cached result remains valid")
+	f.DurationVar(&o.timeout, "timeout", 60*time.Second, "per-query timeout for schema collection and analysis (0 = no limit)")
 	_ = cmd.MarkFlagRequired("dsn")
 	return cmd
 }
@@ -74,6 +76,7 @@ func runWatch(ctx context.Context, out io.Writer, o watchOpts) error {
 	if apiKey == "" {
 		return errors.New("ANTHROPIC_API_KEY is not set")
 	}
+
 
 	dialect, err := resolveDialect(o.dialect, o.dsn)
 	if err != nil {
@@ -99,7 +102,15 @@ func runWatch(ctx context.Context, out io.Writer, o watchOpts) error {
 			i+1, len(stmts), s.Calls, s.MeanMs, s.TotalMs)
 		fmt.Fprintf(out, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
 
-		pack, err := col.Collect(ctx, s.Query, target.CollectOptions{SchemaOnly: true, LenientParse: true})
+		// Apply per-query timeout for schema collection + agent call.
+		qctx := ctx
+		if o.timeout > 0 {
+			var cancel context.CancelFunc
+			qctx, cancel = context.WithTimeout(ctx, o.timeout)
+			defer cancel()
+		}
+
+		pack, err := col.Collect(qctx, s.Query, target.CollectOptions{SchemaOnly: true, LenientParse: true})
 		if err != nil {
 			fmt.Fprintf(out, "  [skip] collect failed: %v\n\n", err)
 			continue
@@ -117,7 +128,7 @@ func runWatch(ctx context.Context, out io.Writer, o watchOpts) error {
 		}
 
 		if result == nil {
-			result, err = agent.Analyze(ctx, agent.Request{
+			result, err = agent.Analyze(qctx, agent.Request{
 				APIKey:   apiKey,
 				Model:    o.model,
 				Context:  pack,

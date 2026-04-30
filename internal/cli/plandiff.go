@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"github.com/YoungsoonLee/meowsql/internal/db/postgres"
 	"github.com/spf13/cobra"
@@ -17,7 +18,7 @@ type DiffResult struct {
 	MigrationFile string  `json:"migration_file,omitempty"`
 	Before        CostRow `json:"before"`
 	After         CostRow `json:"after"`
-	PctChange     float64 `json:"pct_change"`   // positive = more expensive
+	PctChange     float64 `json:"pct_change"` // positive = more expensive
 	Regression    bool    `json:"regression"`
 	Error         string  `json:"error,omitempty"`
 }
@@ -34,6 +35,7 @@ type planDiffOpts struct {
 	migrationFile string
 	threshold     float64
 	exitCode      bool
+	timeout       time.Duration
 }
 
 func newPlanDiffCmd() *cobra.Command {
@@ -65,6 +67,7 @@ Exit codes with --exit-code:
 	f.StringVar(&o.migrationFile, "migration", "", "DDL file to apply inside a rolled-back transaction")
 	f.Float64Var(&o.threshold, "threshold", 10.0, "regression threshold in percent")
 	f.BoolVar(&o.exitCode, "exit-code", false, "exit 1 when a regression is detected")
+	f.DurationVar(&o.timeout, "timeout", 60*time.Second, "EXPLAIN timeout per phase (0 = no limit)")
 	_ = cmd.MarkFlagRequired("dsn")
 	_ = cmd.MarkFlagRequired("file")
 	return cmd
@@ -76,11 +79,20 @@ func runPlanDiff(ctx context.Context, out io.Writer, o planDiffOpts) error {
 		return fmt.Errorf("read --file: %w", err)
 	}
 
+	if o.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, o.timeout)
+		defer cancel()
+	}
+
 	col, err := postgres.Open(ctx, o.dsn)
 	if err != nil {
 		return fmt.Errorf("connect: %w", err)
 	}
 	defer col.Close()
+
+	// Prevent EXPLAIN from blocking behind long-held table locks.
+	_ = col.ApplySafetySettings(ctx, 5*time.Second)
 
 	before, err := col.ExplainCost(ctx, string(querySql))
 	if err != nil {
