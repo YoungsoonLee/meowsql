@@ -5,6 +5,7 @@ E2E_DSN       := postgres://meowsql:meowsql@localhost:55432/meowsql?sslmode=disa
 E2E_MYSQL_DSN := mysql://meowsql:meowsql@localhost:53306/meowsql
 PSQL          := docker compose exec -T postgres psql -U meowsql -d meowsql -v ON_ERROR_STOP=1
 MYSQL         := docker compose exec -T mysql mysql -umeowsql -pmeowsql meowsql
+MYSQL_ROOT    := docker compose exec -T mysql mysql -uroot -pmeowsql
 
 .PHONY: build run test tidy fmt vet clean \
         e2e e2e-up e2e-wait e2e-seed e2e-run e2e-explain e2e-down \
@@ -89,6 +90,8 @@ e2e-mysql-wait:
 	echo "MySQL did not become ready in time." >&2; exit 1
 
 e2e-mysql-seed:
+	@echo "==> grants"
+	@$(MYSQL_ROOT) -e "GRANT SELECT ON performance_schema.* TO 'meowsql'@'%'; FLUSH PRIVILEGES;"
 	@echo "==> schema"
 	@$(MYSQL) < testdata/seed-mysql/01_schema.sql
 	@echo "==> seed (100k users, 500k orders — may take a minute)"
