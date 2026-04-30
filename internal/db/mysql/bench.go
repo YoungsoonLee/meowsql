@@ -19,48 +19,54 @@ var reCreateIndex = regexp.MustCompile(
 
 // Bench measures wall-clock query latency before and after applying an index.
 //
-// Unlike PostgreSQL, MySQL DDL is NOT transactional — CREATE INDEX commits
-// immediately. Bench therefore follows a real create → measure → drop cycle.
-// If the DROP fails the error message names the index so the caller can clean
-// up manually.
+// Every individual query execution — SELECT or DML — is wrapped in its own
+// BEGIN / ROLLBACK transaction so that UPDATE / DELETE / INSERT results are
+// never committed. Timing covers only the query + row fetch, not the
+// transaction management overhead.
+//
+// MySQL DDL (CREATE INDEX) is NOT transactional, so the index is created for
+// real, measurements are taken, then the index is dropped. If DROP fails, the
+// error message names the index so the caller can clean up manually.
 func (c *Collector) Bench(ctx context.Context, opts target.BenchOptions) (*target.BenchResult, error) {
 	if opts.Runs <= 0 {
 		opts.Runs = 10
 	}
 
-	before, err := mysqlTimePhase(ctx, c.db, opts.SQL, opts.Runs, opts.Warmup)
+	trimmed := strings.TrimRight(strings.TrimSpace(opts.SQL), ";")
+
+	before, err := mysqlTimePhase(ctx, c.db, trimmed, opts.Runs, opts.Warmup, opts.Timeout)
 	if err != nil {
 		return nil, fmt.Errorf("before phase: %w", err)
 	}
 
 	result := &target.BenchResult{Before: before, After: before}
-
 	if opts.DDL == "" {
 		return result, nil
 	}
 
-	// Parse CREATE INDEX so we know what to DROP afterward.
 	indexName, tableName, err := parseCreateIndex(opts.DDL)
 	if err != nil {
 		return nil, err
 	}
 
-	// Apply DDL (commits immediately in MySQL).
-	for _, stmt := range splitMySQL(opts.DDL) {
-		if _, err := c.db.ExecContext(ctx, stmt); err != nil {
+	// Apply DDL — commits immediately in MySQL.
+	for s := range strings.SplitSeq(opts.DDL, ";") {
+		s = strings.TrimSpace(s)
+		if s == "" || strings.HasPrefix(s, "--") {
+			continue
+		}
+		if _, err := c.db.ExecContext(ctx, s); err != nil {
 			return nil, fmt.Errorf("apply ddl: %w", err)
 		}
 	}
 
-	after, err := mysqlTimePhase(ctx, c.db, opts.SQL, opts.Runs, opts.Warmup)
+	after, err := mysqlTimePhase(ctx, c.db, trimmed, opts.Runs, opts.Warmup, opts.Timeout)
 
-	// Always attempt cleanup, even if the after phase failed.
+	// Always drop the index, even if the after phase failed.
 	dropSQL := fmt.Sprintf("DROP INDEX `%s` ON `%s`", indexName, tableName)
 	if _, dropErr := c.db.ExecContext(ctx, dropSQL); dropErr != nil {
-		// If the after phase also failed, surface the original error.
-		// If it succeeded, the drop failure is the most important thing to surface.
 		return nil, fmt.Errorf(
-			"bench completed but DROP INDEX failed — index `%s` still exists on `%s`: %w",
+			"bench completed but DROP INDEX failed — index `%s` on `%s` still exists: %w",
 			indexName, tableName, dropErr,
 		)
 	}
@@ -76,33 +82,71 @@ func (c *Collector) Bench(ctx context.Context, opts target.BenchOptions) (*targe
 	return result, nil
 }
 
-func mysqlTimePhase(ctx context.Context, db *sql.DB, sql string, runs, warmup int) (target.RunStats, error) {
-	trimmed := strings.TrimRight(strings.TrimSpace(sql), ";")
+// mysqlTimePhase runs warmup then measured iterations. Each run is wrapped in
+// its own BEGIN/ROLLBACK so DML never commits.
+func mysqlTimePhase(ctx context.Context, db *sql.DB, query string, runs, warmup int, timeout time.Duration) (target.RunStats, error) {
+	run := func(ctx context.Context) (time.Duration, error) {
+		return mysqlRunInTx(ctx, db, query, timeout)
+	}
 	for range warmup {
-		if err := mysqlDrainQuery(ctx, db, trimmed); err != nil {
+		if _, err := run(ctx); err != nil {
 			return target.RunStats{}, err
 		}
 	}
 	durations := make([]time.Duration, runs)
 	for i := range runs {
-		t := time.Now()
-		if err := mysqlDrainQuery(ctx, db, trimmed); err != nil {
+		d, err := run(ctx)
+		if err != nil {
 			return target.RunStats{}, err
 		}
-		durations[i] = time.Since(t)
+		durations[i] = d
 	}
 	return mysqlComputeStats(durations), nil
 }
 
-func mysqlDrainQuery(ctx context.Context, db *sql.DB, query string) error {
-	rows, err := db.QueryContext(ctx, query)
+// mysqlRunInTx executes query inside a fresh transaction that is always
+// rolled back. Timing covers only the query + row fetch.
+// MAX_EXECUTION_TIME hint is injected into SELECT queries when a timeout is
+// set; for DML the timeout relies on the context deadline.
+func mysqlRunInTx(ctx context.Context, db *sql.DB, query string, timeout time.Duration) (time.Duration, error) {
+	runCtx := ctx
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		runCtx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+
+	tx, err := db.BeginTx(runCtx, nil)
 	if err != nil {
-		return fmt.Errorf("execute: %w", err)
+		return 0, fmt.Errorf("begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Inject MAX_EXECUTION_TIME hint for SELECT queries (MySQL 5.7.8+).
+	// This enforces the timeout server-side, independent of the Go context.
+	q := query
+	if timeout > 0 && isSelect(query) {
+		ms := timeout.Milliseconds()
+		q = fmt.Sprintf("SELECT /*+ MAX_EXECUTION_TIME(%d) */ %s", ms,
+			query[len("SELECT"):])
+	}
+
+	t := time.Now()
+	rows, err := tx.QueryContext(runCtx, q)
+	if err != nil {
+		return 0, fmt.Errorf("execute: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 	}
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	return time.Since(t), nil
+}
+
+func isSelect(sql string) bool {
+	return len(sql) >= 6 && strings.EqualFold(sql[:6], "select")
 }
 
 func mysqlComputeStats(d []time.Duration) target.RunStats {
@@ -128,25 +172,12 @@ func parseCreateIndex(ddl string) (indexName, tableName string, err error) {
 	m := reCreateIndex.FindStringSubmatch(ddl)
 	if m == nil {
 		return "", "", fmt.Errorf(
-			"--index DDL must be a CREATE INDEX statement for MySQL bench " +
+			"--index must be a CREATE INDEX statement for MySQL " +
 				"(e.g. CREATE INDEX idx_name ON tbl (col)); got: %s",
 			truncateMySQL(ddl, 80),
 		)
 	}
 	return m[1], m[2], nil
-}
-
-// splitMySQL splits DDL on semicolons, skipping blank/comment-only chunks.
-func splitMySQL(ddl string) []string {
-	var out []string
-	for s := range strings.SplitSeq(ddl, ";") {
-		s = strings.TrimSpace(s)
-		if s == "" || strings.HasPrefix(s, "--") {
-			continue
-		}
-		out = append(out, s)
-	}
-	return out
 }
 
 func truncateMySQL(s string, n int) string {

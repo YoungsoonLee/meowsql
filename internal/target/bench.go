@@ -4,10 +4,11 @@ import "time"
 
 // BenchOptions controls a Bench run for any dialect.
 type BenchOptions struct {
-	SQL    string
-	DDL    string // index DDL; empty means baseline only
-	Runs   int
-	Warmup int
+	SQL     string
+	DDL     string        // index DDL; empty means baseline only
+	Runs    int
+	Warmup  int
+	Timeout time.Duration // per-query statement timeout; 0 = no limit
 }
 
 // RunStats holds timing percentiles for one benchmark phase.

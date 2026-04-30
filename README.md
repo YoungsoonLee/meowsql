@@ -271,12 +271,31 @@ your tracked queries in `testdata/examples/`, migrations in `migrations/` or
 query** and measures wall-clock latency, giving you concrete before/after
 numbers to put in a PR or incident report.
 
-**PostgreSQL:** DDL is applied inside `BEGIN` / `ROLLBACK` — the index exists
-only for the duration of the transaction and never persists.
+**Safe to run on production.** Every individual query execution — `SELECT`,
+`UPDATE`, `DELETE`, `INSERT` — is wrapped in its own `BEGIN` / `ROLLBACK`
+transaction. Results are **never committed**. You can point `bench` at a live
+database without fear of corrupting data.
 
-**MySQL:** DDL is not transactional. `bench` creates the index, measures, then
-drops it. If the drop fails, the error message names the index so you can
-clean up manually.
+| | PostgreSQL | MySQL |
+|--|--|--|
+| Query execution | `BEGIN` → run → `ROLLBACK` per iteration | `BEGIN` → run → `ROLLBACK` per iteration |
+| DML side effects | None — always rolled back | None — always rolled back |
+| Index DDL | Applied in outer `BEGIN` / `ROLLBACK` — never persists | Created for real, then `DROP INDEX` after bench |
+| Index cleanup failure | N/A | Error message names the index to drop manually |
+| Statement timeout | `SET LOCAL statement_timeout` per run | `MAX_EXECUTION_TIME` hint + context deadline |
+| Lock timeout | `SET LOCAL lock_timeout = '5s'` per run | Context deadline |
+
+**Three layers of protection:**
+
+1. **DML guard** — `UPDATE`/`DELETE`/`INSERT`/`TRUNCATE` queries are blocked by default.  
+   Pass `--allow-dml` to explicitly opt in. You'll still see the rollback confirmation note.
+
+2. **Statement timeout** (`--timeout 30s`, default) — A runaway query is cancelled after N seconds,  
+   preventing it from blocking the database. PostgreSQL uses `SET LOCAL statement_timeout`;  
+   MySQL injects a `MAX_EXECUTION_TIME` optimizer hint into `SELECT` queries.
+
+3. **Lock timeout** (PostgreSQL only) — `SET LOCAL lock_timeout = '5s'` per run prevents the  
+   bench from waiting forever when another session holds a conflicting lock.
 
 ```bash
 # PostgreSQL — baseline only
@@ -340,6 +359,8 @@ Example output:
 | `--index-file` | File containing DDL (alternative to `--index`). |
 | `--runs` | Number of measured executions per phase (default 10). |
 | `--warmup` | Unmeasured warm-up runs before each phase (default 2). |
+| `--timeout` | Per-query statement timeout (default `30s`, `0` = no limit). |
+| `--allow-dml` | Required when the query is `UPDATE`/`DELETE`/`INSERT`/`TRUNCATE`. |
 | `--json` | Machine-readable output. |
 
 ---

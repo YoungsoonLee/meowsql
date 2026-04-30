@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/YoungsoonLee/meowsql/internal/db/mysql"
 	"github.com/YoungsoonLee/meowsql/internal/db/postgres"
@@ -23,7 +25,20 @@ type benchOpts struct {
 	migrationFile string
 	runs          int
 	warmup        int
+	timeout       time.Duration
+	allowDML      bool
 	jsonOut       bool
+}
+
+// dmlKeywords are SQL statement types that modify data.
+var dmlKeywords = []string{"insert", "update", "delete", "truncate", "replace", "merge"}
+
+func isDML(sql string) bool {
+	fields := strings.Fields(strings.TrimSpace(sql))
+	if len(fields) == 0 {
+		return false
+	}
+	return slices.Contains(dmlKeywords, strings.ToLower(fields[0]))
 }
 
 // BenchReport is the machine-readable output of bench.
@@ -81,6 +96,8 @@ Omit both to record a baseline without a comparison.`,
 	f.StringVar(&o.migrationFile, "index-file", "", "file containing DDL (alternative to --index)")
 	f.IntVar(&o.runs, "runs", 10, "number of measured executions per phase")
 	f.IntVar(&o.warmup, "warmup", 2, "number of unmeasured warm-up executions per phase")
+	f.DurationVar(&o.timeout, "timeout", 30*time.Second, "per-query statement timeout (0 = no limit)")
+	f.BoolVar(&o.allowDML, "allow-dml", false, "required when the query is UPDATE/DELETE/INSERT/TRUNCATE")
 	f.BoolVar(&o.jsonOut, "json", false, "machine-readable JSON output")
 	_ = cmd.MarkFlagRequired("dsn")
 	_ = cmd.MarkFlagRequired("file")
@@ -105,6 +122,17 @@ func runBench(ctx context.Context, out io.Writer, o benchOpts) error {
 		ddl = strings.TrimSpace(string(b))
 	}
 
+	// DML guard: require explicit opt-in so users are never surprised by
+	// accidental writes. Each run IS rolled back, but the flag ensures the
+	// user has read the warning.
+	if isDML(string(querySql)) && !o.allowDML {
+		return fmt.Errorf(
+			"the query appears to be a DML statement (UPDATE/DELETE/INSERT/TRUNCATE).\n" +
+				"Each run is wrapped in BEGIN/ROLLBACK so data is never committed,\n" +
+				"but pass --allow-dml to confirm you understand this and proceed.",
+		)
+	}
+
 	dialect, err := resolveDialect(o.dialect, o.dsn)
 	if err != nil {
 		return err
@@ -116,19 +144,30 @@ func runBench(ctx context.Context, out io.Writer, o benchOpts) error {
 	}
 	defer b.Close()
 
-	// Warn MySQL users that the index will be temporarily created for real.
-	if dialect == "mysql" && ddl != "" && !o.jsonOut {
+	if !o.jsonOut {
 		dim := color.New(color.FgHiBlack).SprintFunc()
-		fmt.Fprintf(out, "%s\n\n",
-			dim("Note: MySQL DDL is not transactional. The index will be created then dropped."),
-		)
+		timeoutNote := ""
+		if o.timeout > 0 {
+			timeoutNote = fmt.Sprintf(" timeout=%s.", o.timeout)
+		}
+		if dialect == "mysql" && ddl != "" {
+			fmt.Fprintf(out, "%s\n\n",
+				dim(fmt.Sprintf("Note: each run is wrapped in BEGIN/ROLLBACK — DML is safe.%s "+
+					"The index will be created then dropped (MySQL DDL is not transactional).", timeoutNote)),
+			)
+		} else {
+			fmt.Fprintf(out, "%s\n\n",
+				dim(fmt.Sprintf("Note: each run is wrapped in BEGIN/ROLLBACK — UPDATE/DELETE/INSERT are never committed.%s", timeoutNote)),
+			)
+		}
 	}
 
 	result, err := b.Bench(ctx, target.BenchOptions{
-		SQL:    string(querySql),
-		DDL:    ddl,
-		Runs:   o.runs,
-		Warmup: o.warmup,
+		SQL:     string(querySql),
+		DDL:     ddl,
+		Runs:    o.runs,
+		Warmup:  o.warmup,
+		Timeout: o.timeout,
 	})
 	if err != nil {
 		return fmt.Errorf("bench: %w", err)
