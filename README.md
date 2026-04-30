@@ -265,6 +265,85 @@ your tracked queries in `testdata/examples/`, migrations in `migrations/` or
 
 ---
 
+## `meowsql bench` — prove the speedup with real numbers
+
+`plan-diff` compares EXPLAIN costs (estimates). `bench` actually **runs the
+query** and measures wall-clock latency, giving you concrete before/after
+numbers to put in a PR or incident report.
+
+**PostgreSQL:** DDL is applied inside `BEGIN` / `ROLLBACK` — the index exists
+only for the duration of the transaction and never persists.
+
+**MySQL:** DDL is not transactional. `bench` creates the index, measures, then
+drops it. If the drop fails, the error message names the index so you can
+clean up manually.
+
+```bash
+# PostgreSQL — baseline only
+meowsql bench \
+  --dsn "postgres://user:pass@localhost:5432/mydb" \
+  --file queries/slow_orders.sql
+
+# PostgreSQL — before/after with inline DDL
+meowsql bench \
+  --dsn "$DATABASE_URL" \
+  --file queries/slow_orders.sql \
+  --index "CREATE INDEX idx_orders_lower_email ON orders (lower(email))"
+
+# MySQL — same flags, dialect auto-detected from DSN
+meowsql bench \
+  --dsn "mysql://user:pass@localhost:3306/shop" \
+  --file queries/slow_orders.sql \
+  --index "CREATE INDEX idx_orders_email ON orders (email)"
+
+# DDL from a file, 20 runs
+meowsql bench \
+  --dsn "$DATABASE_URL" \
+  --file queries/slow_orders.sql \
+  --index-file migrations/0043_add_email_index.sql \
+  --runs 20
+
+# JSON output (pipe into jq)
+meowsql bench --dsn "$DATABASE_URL" --file queries/slow_orders.sql \
+  --index "CREATE INDEX ..." --json | jq '{speedup: .speedup_x}'
+```
+
+Example output:
+
+```
+🐾 MeowSQL Bench — PostgreSQL
+
+  Query      queries/slow_orders.sql
+  Runs       10 (+ 2 warmup)
+  Index      CREATE INDEX idx_orders_lower_email ON orders (lower(email))
+
+             mean        p50         p99         min         max
+  ──────────────────────────────────────────────────────────────
+  Before     85.3ms      84.1ms     102.8ms      81.2ms     104.5ms
+  After       0.4ms       0.4ms       0.8ms       0.4ms       0.9ms
+
+  Speedup    213× faster  (p50 basis)
+```
+
+### `bench` flags
+
+| Flag | What it does |
+|------|-------------|
+| `--dsn` | PostgreSQL connection string (required). |
+| `--file` | SQL query file to benchmark (required). |
+| `--index` | Index DDL to apply inside a rolled-back transaction. |
+| `--index-file` | File containing DDL (alternative to `--index`). |
+| `--dsn` | Database connection string (required). |
+| `--dialect` | Force `postgres` or `mysql` when the DSN is ambiguous. |
+| `--file` | SQL query file to benchmark (required). |
+| `--index` | Index DDL to apply (one-liner). |
+| `--index-file` | File containing DDL (alternative to `--index`). |
+| `--runs` | Number of measured executions per phase (default 10). |
+| `--warmup` | Unmeasured warm-up runs before each phase (default 2). |
+| `--json` | Machine-readable output. |
+
+---
+
 ## VS Code Extension
 
 The `vscode-meowsql` extension adds an inline **"🐾 Optimize with MeowSQL"** CodeLens
@@ -358,7 +437,7 @@ turns that into a product.
       for the worse
 - [x] VS Code extension: inline "optimize this query" action
 - [x] Query cache so repeated analyses are free
-- [ ] `meowsql bench` — before/after timing harness
+- [x] `meowsql bench` — before/after timing harness
 
 ### Phase 3 — SaaS (MeowSQL Cloud)
 

@@ -13,6 +13,7 @@ func NewRoot(version string) *cobra.Command {
 	cmd.AddCommand(newAnalyzeCmd())
 	cmd.AddCommand(newWatchCmd())
 	cmd.AddCommand(newPlanDiffCmd())
+	cmd.AddCommand(newBenchCmd())
 	cmd.AddCommand(newCacheCmd())
 	return cmd
 }
