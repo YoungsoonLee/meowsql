@@ -28,6 +28,7 @@ type watchOpts struct {
 	noCache  bool
 	cacheTTL time.Duration
 	timeout  time.Duration
+	dryRun   bool
 }
 
 // watchStatement is the shared type returned by both dialect collectors.
@@ -67,20 +68,47 @@ Requires ANTHROPIC_API_KEY.`,
 	f.BoolVar(&o.noCache, "no-cache", false, "skip cache lookup and do not write a new entry")
 	f.DurationVar(&o.cacheTTL, "cache-ttl", 24*time.Hour, "how long a cached result remains valid")
 	f.DurationVar(&o.timeout, "timeout", 60*time.Second, "per-query timeout for schema collection and analysis (0 = no limit)")
+	f.BoolVar(&o.dryRun, "dry-run", false, "print what would be executed without connecting to the database")
 	_ = cmd.MarkFlagRequired("dsn")
 	return cmd
 }
 
 func runWatch(ctx context.Context, out io.Writer, o watchOpts) error {
-	apiKey := strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY"))
-	if apiKey == "" {
-		return errors.New("ANTHROPIC_API_KEY is not set")
-	}
-
-
 	dialect, err := resolveDialect(o.dialect, o.dsn)
 	if err != nil {
 		return err
+	}
+
+	if o.dryRun {
+		statView := "pg_stat_statements"
+		if dialect == "mysql" {
+			statView = "performance_schema.events_statements_summary_by_digest"
+		}
+		printDryRun(out, []drySection{
+			{Title: "Connection", Lines: []string{
+				"DSN:     " + maskDSN(o.dsn),
+				"Dialect: " + dialect,
+				"Mode:    read-only session",
+			}},
+			{Title: "Would query from database", Lines: []string{
+				fmt.Sprintf("  SELECT from %s", statView),
+				fmt.Sprintf("  WHERE calls >= %d", o.minCalls),
+				fmt.Sprintf("  ORDER BY total_exec_time DESC LIMIT %d", o.top),
+				"",
+				"  Schema queries on pg_catalog / information_schema",
+				"  for every table referenced in each slow query",
+			}},
+			{Title: "Would send to Claude API (per query)", Lines: []string{
+				"  Query text + schema fragments",
+				"  (credentials and row data never leave your machine)",
+			}},
+		})
+		return nil
+	}
+
+	apiKey := strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY"))
+	if apiKey == "" {
+		return errors.New("ANTHROPIC_API_KEY is not set")
 	}
 
 	stmts, col, validate, err := fetchStatements(ctx, dialect, o.dsn, o.top, o.minCalls)
@@ -195,6 +223,7 @@ func fetchStatements(ctx context.Context, dialect, dsn string, top int, minCalls
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("connect: %w", err)
 		}
+		_ = c.SetReadOnly(ctx)
 		wc := &pgWatchCollector{c}
 		stmts, err := wc.TopStatements(ctx, top, minCalls)
 		if err != nil {
@@ -207,6 +236,7 @@ func fetchStatements(ctx context.Context, dialect, dsn string, top int, minCalls
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("connect: %w", err)
 		}
+		_ = c.SetReadOnly(ctx)
 		wc := &myWatchCollector{c}
 		stmts, err := wc.TopStatements(ctx, top, minCalls)
 		if err != nil {

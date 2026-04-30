@@ -27,6 +27,9 @@ type benchOpts struct {
 	timeout       time.Duration
 	allowDML      bool
 	jsonOut       bool
+	dryRun        bool
+	maxRows       int
+	cleanup       bool
 }
 
 
@@ -88,6 +91,9 @@ Omit both to record a baseline without a comparison.`,
 	f.DurationVar(&o.timeout, "timeout", 30*time.Second, "per-query statement timeout (0 = no limit)")
 	f.BoolVar(&o.allowDML, "allow-dml", false, "required when the query is UPDATE/DELETE/INSERT/TRUNCATE")
 	f.BoolVar(&o.jsonOut, "json", false, "machine-readable JSON output")
+	f.BoolVar(&o.dryRun, "dry-run", false, "print what would be executed without connecting to the database")
+	f.IntVar(&o.maxRows, "max-rows", 10000, "auto-append LIMIT N to SELECT queries that have no LIMIT (0 = disabled)")
+	f.BoolVar(&o.cleanup, "cleanup", false, "drop leftover meowsql_bench_* indexes from a previous interrupted run (MySQL only)")
 	_ = cmd.MarkFlagRequired("dsn")
 	_ = cmd.MarkFlagRequired("file")
 	return cmd
@@ -127,11 +133,75 @@ func runBench(ctx context.Context, out io.Writer, o benchOpts) error {
 		return err
 	}
 
+	// Auto-LIMIT: cap runaway SELECT scans before they saturate the wire.
+	sql := applyMaxRows(string(querySql), o.maxRows)
+
+	if o.dryRun {
+		indexLines := []string{"  (no index — baseline only)"}
+		if ddl != "" {
+			if dialect == "postgres" {
+				indexLines = []string{
+					"  BEGIN",
+					"  " + firstLine(ddl),
+					"  ... (schema change applied)",
+					"  EXPLAIN query → after cost",
+					"  ROLLBACK  ← schema change never persists",
+				}
+			} else {
+				indexLines = []string{
+					"  CREATE INDEX  (committed — MySQL DDL is not transactional)",
+					"  Measure query ...",
+					"  DROP INDEX    (cleaned up automatically)",
+				}
+			}
+		}
+		printDryRun(out, []drySection{
+			{Title: "Connection", Lines: []string{
+				"DSN:     " + maskDSN(o.dsn),
+				"Dialect: " + dialect,
+			}},
+			{Title: "Query to benchmark", Lines: []string{
+				"  " + firstLine(sql),
+				fmt.Sprintf("  runs=%d  warmup=%d  timeout=%s", o.runs, o.warmup, o.timeout),
+			}},
+			{Title: "Index phase", Lines: indexLines},
+		})
+		return nil
+	}
+
 	b, err := openBencher(ctx, dialect, o.dsn)
 	if err != nil {
 		return fmt.Errorf("connect: %w", err)
 	}
 	defer b.Close()
+
+	// --cleanup: drop leftover meowsql_bench_* indexes from a crashed prior run.
+	if o.cleanup {
+		if dialect != "mysql" {
+			return fmt.Errorf("--cleanup is only applicable to MySQL (PostgreSQL DDL is transactional and self-cleaning)")
+		}
+		mc, ok := b.(*mysql.Collector)
+		if !ok {
+			return fmt.Errorf("internal: expected *mysql.Collector for cleanup")
+		}
+		indexes, err := mc.FindBenchIndexes(ctx)
+		if err != nil {
+			return fmt.Errorf("list bench indexes: %w", err)
+		}
+		if len(indexes) == 0 {
+			fmt.Fprintln(out, "No leftover meowsql_bench_* indexes found.")
+			return nil
+		}
+		for _, idx := range indexes {
+			fmt.Fprintf(out, "Dropping %s.%s (%s)... ", idx.Schema, idx.Table, idx.Index)
+			if err := mc.DropBenchIndex(ctx, idx); err != nil {
+				fmt.Fprintf(out, "FAILED: %v\n", err)
+			} else {
+				fmt.Fprintln(out, "OK")
+			}
+		}
+		return nil
+	}
 
 	if !o.jsonOut {
 		dim := color.New(color.FgHiBlack).SprintFunc()
@@ -152,7 +222,7 @@ func runBench(ctx context.Context, out io.Writer, o benchOpts) error {
 	}
 
 	result, err := b.Bench(ctx, target.BenchOptions{
-		SQL:     string(querySql),
+		SQL:     sql,
 		DDL:     ddl,
 		Runs:    o.runs,
 		Warmup:  o.warmup,

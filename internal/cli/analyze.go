@@ -31,6 +31,7 @@ type analyzeOpts struct {
 	noCache    bool
 	cacheTTL   time.Duration
 	timeout    time.Duration
+	dryRun     bool
 }
 
 type collector interface {
@@ -75,6 +76,7 @@ Safety:
 	f.BoolVar(&o.noCache, "no-cache", false, "skip cache lookup and do not write a new entry")
 	f.DurationVar(&o.cacheTTL, "cache-ttl", 24*time.Hour, "how long a cached result remains valid")
 	f.DurationVar(&o.timeout, "timeout", 60*time.Second, "overall query timeout for EXPLAIN and schema collection (0 = no limit)")
+	f.BoolVar(&o.dryRun, "dry-run", false, "print what would be executed without connecting to the database")
 	_ = cmd.MarkFlagRequired("dsn")
 	return cmd
 }
@@ -87,6 +89,45 @@ func runAnalyze(ctx context.Context, in io.Reader, out io.Writer, o analyzeOpts)
 	sql, err := readSQL(in, o)
 	if err != nil {
 		return err
+	}
+
+	dialect, err := resolveDialect(o.dialect, o.dsn)
+	if err != nil {
+		return err
+	}
+
+	if o.dryRun {
+		explainClause := "EXPLAIN (FORMAT JSON, VERBOSE, COSTS)"
+		if o.runAnalyze {
+			explainClause = "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, VERBOSE, COSTS)"
+		}
+		sections := []drySection{
+			{Title: "Connection", Lines: []string{
+				"DSN:     " + maskDSN(o.dsn),
+				"Dialect: " + dialect,
+				"Mode:    read-only session (no writes possible)",
+			}},
+			{Title: "Would execute against the database", Lines: []string{
+				"  " + explainClause,
+				"  " + firstLine(sql),
+				"  ...",
+				"",
+				"  Schema queries on pg_catalog / information_schema",
+				"  for every table referenced in the query",
+			}},
+			{Title: "Would send to Claude API", Lines: []string{
+				"  Query text + EXPLAIN plan + schema fragments",
+				"  (credentials and row data never leave your machine)",
+			}},
+		}
+		if o.runAnalyze && isDML(sql) {
+			sections[1].Lines = append([]string{
+				"⚠  DML detected — runs inside BEGIN/ROLLBACK, never committed",
+				"",
+			}, sections[1].Lines...)
+		}
+		printDryRun(out, sections)
+		return nil
 	}
 
 	// Warn when --analyze will actually execute a DML query (rolled back, but runs).
@@ -109,12 +150,9 @@ func runAnalyze(ctx context.Context, in io.Reader, out io.Writer, o analyzeOpts)
 		return errors.New("ANTHROPIC_API_KEY is not set")
 	}
 
-	dialect, err := resolveDialect(o.dialect, o.dsn)
-	if err != nil {
-		return err
-	}
-
-	col, validate, err := openCollector(ctx, dialect, o.dsn)
+	// Read-only session for commands that only need EXPLAIN/schema — never write.
+	readOnly := !o.runAnalyze && !o.schemaOnly
+	col, validate, err := openCollector(ctx, dialect, o.dsn, readOnly)
 	if err != nil {
 		return fmt.Errorf("connect: %w", err)
 	}
@@ -175,20 +213,25 @@ func resolveDialect(override, dsn string) (string, error) {
 	return "", errors.New("cannot infer dialect from DSN; pass --dialect postgres|mysql")
 }
 
-func openCollector(ctx context.Context, dialect, dsn string) (collector, agent.Validator, error) {
+func openCollector(ctx context.Context, dialect, dsn string, readOnly bool) (collector, agent.Validator, error) {
 	switch dialect {
 	case "postgres":
 		c, err := postgres.Open(ctx, dsn)
 		if err != nil {
 			return nil, nil, err
 		}
-		// Best-effort: prevent schema queries from blocking behind long-held locks.
 		_ = c.ApplySafetySettings(ctx, 5*time.Second)
+		if readOnly {
+			_ = c.SetReadOnly(ctx)
+		}
 		return c, postgres.ValidateOnly, nil
 	case "mysql":
 		c, err := mysql.Open(ctx, dsn)
 		if err != nil {
 			return nil, nil, err
+		}
+		if readOnly {
+			_ = c.SetReadOnly(ctx)
 		}
 		return c, mysql.ValidateOnly, nil
 	}

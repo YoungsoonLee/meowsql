@@ -59,16 +59,33 @@ writes. You can point it at a live database without fear.
 
 | Protection | `analyze` | `analyze --analyze` | `watch` | `plan-diff` | `bench` |
 |--|:--:|:--:|:--:|:--:|:--:|
+| `--dry-run` — no DB connection at all | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Read-only session (no writes possible) | ✅ | — | ✅ | — | — |
 | Query never executes (EXPLAIN only) | ✅ | — | ✅ | ✅ | — |
 | DML wrapped in `BEGIN` / `ROLLBACK` | — | ✅ always | — | — | ✅ always |
 | DML guard — requires `--allow-dml` | — | ⚠️ warning | — | — | ✅ blocked |
+| `--max-rows` auto-LIMIT on SELECT | — | — | — | — | ✅ 10 000 |
 | Statement timeout (`--timeout`) | ✅ 60s | ✅ 60s | ✅ 60s | ✅ 60s | ✅ 30s |
 | Lock timeout (PostgreSQL, 5 s) | ✅ | ✅ | ✅ | ✅ | ✅ per run |
+| MySQL index named `meowsql_bench_*` | — | — | — | — | ✅ |
+
+**`--dry-run`** — Every command accepts `--dry-run`. It prints exactly what
+would be sent to the database and to the Claude API, then exits — no connection
+is ever opened. Use it to audit or demo before pointing at a production host.
+
+**Read-only session** — `analyze` (without `--analyze`) and `watch` open their
+connection in `READ ONLY` mode at the session level
+(`SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY` / `SET SESSION TRANSACTION READ ONLY`).
+Any attempt to write data is rejected by the server, not just by MeowSQL.
 
 **Query rollback** — `analyze --analyze` runs `EXPLAIN ANALYZE` inside a
 `BEGIN` / `ROLLBACK` transaction. `bench` wraps every individual execution the
 same way. `UPDATE`, `DELETE`, and `INSERT` run for timing or plan purposes but
 are **never committed** to the database.
+
+**`--max-rows`** (`bench`) — SELECT queries without an explicit `LIMIT` have
+`LIMIT 10000` appended automatically, preventing a full-table scan from
+saturating the network during a benchmark run. Disable with `--max-rows 0`.
 
 **Statement timeout** — Every command accepts `--timeout` (default 60 s for
 analysis commands, 30 s for bench). When the limit is hit, the database cancels
@@ -83,6 +100,10 @@ never wait more than 5 seconds for a table lock held by another session.
 **DML guard** (`bench` only) — `UPDATE` / `DELETE` / `INSERT` / `TRUNCATE`
 queries are blocked unless you pass `--allow-dml`. Even then, every run is
 rolled back. For `analyze --analyze`, a notice is printed automatically.
+
+**MySQL index naming** (`bench`) — When `bench` creates an index on MySQL it
+is renamed to `meowsql_bench_<original>_<timestamp>` so leftover indexes from
+a crash are immediately identifiable. Run `bench --cleanup` to drop them all.
 
 ---
 
@@ -169,6 +190,8 @@ meowsql analyze --dsn "$DATABASE_URL" --file slow.sql --json
 | `--model` | Override the Claude model. Defaults to a fast/cheap one. |
 | `--no-cache` | Skip cache lookup and do not write a new entry. |
 | `--cache-ttl` | How long a cached result remains valid (default `24h`). |
+| `--timeout` | Overall timeout for EXPLAIN + schema collection (default `60s`, `0` = no limit). |
+| `--dry-run` | Print what would be executed without connecting to the database. |
 
 Results are cached in `~/.cache/meowsql/` (macOS: `~/Library/Caches/meowsql/`).
 The cache key is derived from the query text and the live schema (columns + indexes),
@@ -216,6 +239,10 @@ meowsql watch --dsn "$DATABASE_URL" --json
 | `--dialect` | Force `postgres` or `mysql` when the DSN is ambiguous. |
 | `--json` | Machine-readable output per query. |
 | `--model` | Override the Claude model. |
+| `--no-cache` | Skip cache lookup and do not write a new entry. |
+| `--cache-ttl` | How long a cached result remains valid (default `24h`). |
+| `--timeout` | Per-query timeout for schema collection and analysis (default `60s`). |
+| `--dry-run` | Print what would be queried without connecting to the database. |
 
 > **Note — PostgreSQL:** `pg_stat_statements` must be loaded before server start:
 > add `shared_preload_libraries = 'pg_stat_statements'` to `postgresql.conf`, restart,
@@ -296,6 +323,8 @@ your tracked queries in `testdata/examples/`, migrations in `migrations/` or
 | `--migration` | DDL file to apply inside a rolled-back transaction. |
 | `--threshold` | Regression threshold in percent (default 10). |
 | `--exit-code` | Exit 1 when a regression is detected — for CI pipelines. |
+| `--timeout` | EXPLAIN timeout per phase (default `60s`, `0` = no limit). |
+| `--dry-run` | Print what would be executed without connecting to the database. |
 
 ---
 
@@ -311,7 +340,8 @@ production](#safe-to-run-on-production) for the full safety story.
 | | PostgreSQL | MySQL |
 |--|--|--|
 | Index DDL | Applied in outer `BEGIN` / `ROLLBACK` — never persists | Created for real, then `DROP INDEX` after bench |
-| Index cleanup failure | N/A | Error names the index to drop manually |
+| Index name | As-written in your DDL | Renamed to `meowsql_bench_<name>_<timestamp>` |
+| Index cleanup failure | N/A | Run `bench --cleanup` to drop leftover `meowsql_bench_*` indexes |
 
 ```bash
 # PostgreSQL — baseline only
@@ -364,10 +394,6 @@ Example output:
 
 | Flag | What it does |
 |------|-------------|
-| `--dsn` | PostgreSQL connection string (required). |
-| `--file` | SQL query file to benchmark (required). |
-| `--index` | Index DDL to apply inside a rolled-back transaction. |
-| `--index-file` | File containing DDL (alternative to `--index`). |
 | `--dsn` | Database connection string (required). |
 | `--dialect` | Force `postgres` or `mysql` when the DSN is ambiguous. |
 | `--file` | SQL query file to benchmark (required). |
@@ -377,7 +403,10 @@ Example output:
 | `--warmup` | Unmeasured warm-up runs before each phase (default 2). |
 | `--timeout` | Per-query statement timeout (default `30s`, `0` = no limit). |
 | `--allow-dml` | Required when the query is `UPDATE`/`DELETE`/`INSERT`/`TRUNCATE`. |
+| `--max-rows` | Auto-append `LIMIT N` to SELECT queries with no LIMIT (default 10000, `0` = disabled). |
+| `--cleanup` | Drop leftover `meowsql_bench_*` indexes from a prior interrupted run (MySQL only). |
 | `--json` | Machine-readable output. |
+| `--dry-run` | Print what would be executed without connecting to the database. |
 
 ---
 

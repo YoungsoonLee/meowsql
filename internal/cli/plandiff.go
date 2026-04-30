@@ -36,6 +36,7 @@ type planDiffOpts struct {
 	threshold     float64
 	exitCode      bool
 	timeout       time.Duration
+	dryRun        bool
 }
 
 func newPlanDiffCmd() *cobra.Command {
@@ -68,6 +69,7 @@ Exit codes with --exit-code:
 	f.Float64Var(&o.threshold, "threshold", 10.0, "regression threshold in percent")
 	f.BoolVar(&o.exitCode, "exit-code", false, "exit 1 when a regression is detected")
 	f.DurationVar(&o.timeout, "timeout", 60*time.Second, "EXPLAIN timeout per phase (0 = no limit)")
+	f.BoolVar(&o.dryRun, "dry-run", false, "print what would be executed without connecting to the database")
 	_ = cmd.MarkFlagRequired("dsn")
 	_ = cmd.MarkFlagRequired("file")
 	return cmd
@@ -77,6 +79,26 @@ func runPlanDiff(ctx context.Context, out io.Writer, o planDiffOpts) error {
 	querySql, err := os.ReadFile(o.queryFile)
 	if err != nil {
 		return fmt.Errorf("read --file: %w", err)
+	}
+
+	if o.dryRun {
+		migLines := []string{"  EXPLAIN query → baseline cost"}
+		if o.migrationFile != "" {
+			migLines = append(migLines,
+				"  BEGIN",
+				"    Apply migration from: "+o.migrationFile,
+				"    EXPLAIN query → after cost",
+				"  ROLLBACK  ← schema change never persists",
+			)
+		}
+		printDryRun(out, []drySection{
+			{Title: "Connection", Lines: []string{
+				"DSN:     " + maskDSN(o.dsn),
+				"Dialect: postgres",
+			}},
+			{Title: "Would execute against the database", Lines: migLines},
+		})
+		return nil
 	}
 
 	if o.timeout > 0 {

@@ -48,6 +48,12 @@ func (c *Collector) Close() error {
 	return c.db.Close()
 }
 
+// SetReadOnly marks the session as read-only at the database level.
+func (c *Collector) SetReadOnly(ctx context.Context) error {
+	_, err := c.db.ExecContext(ctx, "SET SESSION TRANSACTION READ ONLY")
+	return err
+}
+
 func (c *Collector) serverVersion(ctx context.Context) (string, error) {
 	var v string
 	err := c.db.QueryRowContext(ctx, "SELECT VERSION()").Scan(&v)

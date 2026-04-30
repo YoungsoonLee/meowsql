@@ -33,6 +33,17 @@ func (c *Collector) serverVersion(ctx context.Context) (string, error) {
 	return v, err
 }
 
+// SetReadOnly marks the session as read-only at the database level.
+// Any attempt to write data will be rejected by the server, providing a
+// hard guarantee beyond the application-level rollback logic.
+// Use for commands that only need to read schema/EXPLAIN output (analyze
+// without --analyze, watch). Do not use for bench or plan-diff which need
+// to apply DDL.
+func (c *Collector) SetReadOnly(ctx context.Context) error {
+	_, err := c.conn.Exec(ctx, "SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
+	return err
+}
+
 // ApplySafetySettings sets session-level safety parameters on the connection.
 // lock_timeout prevents schema queries from blocking behind long-running
 // transactions that hold table locks.

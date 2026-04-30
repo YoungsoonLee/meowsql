@@ -12,6 +12,8 @@ import (
 	"github.com/YoungsoonLee/meowsql/internal/target"
 )
 
+const benchIndexPrefix = "meowsql_bench_"
+
 // reCreateIndex matches: CREATE [UNIQUE] INDEX idx ON tbl (...)
 var reCreateIndex = regexp.MustCompile(
 	`(?i)CREATE\s+(?:UNIQUE\s+)?INDEX\s+` + "`?" + `(\w+)` + "`?" + `\s+ON\s+` + "`?" + `(\w+)` + "`?",
@@ -44,13 +46,25 @@ func (c *Collector) Bench(ctx context.Context, opts target.BenchOptions) (*targe
 		return result, nil
 	}
 
-	indexName, tableName, err := parseCreateIndex(opts.DDL)
+	origName, tableName, err := parseCreateIndex(opts.DDL)
 	if err != nil {
 		return nil, err
 	}
 
+	// Rename index to meowsql_bench_<original>_<unix-ms> so it is
+	// clearly owned by meowsql and can be identified / cleaned up if a
+	// crash leaves it behind.
+	safeName := fmt.Sprintf("%s%s_%d", benchIndexPrefix, origName, time.Now().UnixMilli())
+	ddl := reCreateIndex.ReplaceAllStringFunc(opts.DDL, func(m string) string {
+		sub := reCreateIndex.FindStringSubmatch(m)
+		if len(sub) < 2 {
+			return m
+		}
+		return strings.Replace(m, sub[1], safeName, 1)
+	})
+
 	// Apply DDL — commits immediately in MySQL.
-	for s := range strings.SplitSeq(opts.DDL, ";") {
+	for s := range strings.SplitSeq(ddl, ";") {
 		s = strings.TrimSpace(s)
 		if s == "" || strings.HasPrefix(s, "--") {
 			continue
@@ -63,11 +77,11 @@ func (c *Collector) Bench(ctx context.Context, opts target.BenchOptions) (*targe
 	after, err := mysqlTimePhase(ctx, c.db, trimmed, opts.Runs, opts.Warmup, opts.Timeout)
 
 	// Always drop the index, even if the after phase failed.
-	dropSQL := fmt.Sprintf("DROP INDEX `%s` ON `%s`", indexName, tableName)
+	dropSQL := fmt.Sprintf("DROP INDEX `%s` ON `%s`", safeName, tableName)
 	if _, dropErr := c.db.ExecContext(ctx, dropSQL); dropErr != nil {
 		return nil, fmt.Errorf(
 			"bench completed but DROP INDEX failed — index `%s` on `%s` still exists: %w",
-			indexName, tableName, dropErr,
+			safeName, tableName, dropErr,
 		)
 	}
 
@@ -166,6 +180,44 @@ func mysqlComputeStats(d []time.Duration) target.RunStats {
 		Min:  d[0],
 		Max:  d[n-1],
 	}
+}
+
+// FindBenchIndexes returns all indexes on the server whose name starts with
+// the meowsql_bench_ prefix — leftover from a previous interrupted bench run.
+func (c *Collector) FindBenchIndexes(ctx context.Context) ([]BenchIndex, error) {
+	rows, err := c.db.QueryContext(ctx, `
+		SELECT TABLE_SCHEMA, TABLE_NAME, INDEX_NAME
+		FROM information_schema.STATISTICS
+		WHERE INDEX_NAME LIKE ?
+		GROUP BY TABLE_SCHEMA, TABLE_NAME, INDEX_NAME`,
+		benchIndexPrefix+"%",
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []BenchIndex
+	for rows.Next() {
+		var bi BenchIndex
+		if err := rows.Scan(&bi.Schema, &bi.Table, &bi.Index); err != nil {
+			return nil, err
+		}
+		out = append(out, bi)
+	}
+	return out, rows.Err()
+}
+
+// BenchIndex identifies a leftover bench index.
+type BenchIndex struct {
+	Schema, Table, Index string
+}
+
+// DropBenchIndex drops a single bench index by name.
+func (c *Collector) DropBenchIndex(ctx context.Context, bi BenchIndex) error {
+	_, err := c.db.ExecContext(ctx,
+		fmt.Sprintf("DROP INDEX `%s` ON `%s`.`%s`", bi.Index, bi.Schema, bi.Table),
+	)
+	return err
 }
 
 func parseCreateIndex(ddl string) (indexName, tableName string, err error) {
