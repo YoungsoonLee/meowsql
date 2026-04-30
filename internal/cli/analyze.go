@@ -7,8 +7,10 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/YoungsoonLee/meowsql/internal/agent"
+	"github.com/YoungsoonLee/meowsql/internal/cache"
 	"github.com/YoungsoonLee/meowsql/internal/db/mysql"
 	"github.com/YoungsoonLee/meowsql/internal/db/postgres"
 	"github.com/YoungsoonLee/meowsql/internal/report"
@@ -25,6 +27,8 @@ type analyzeOpts struct {
 	schemaOnly bool
 	jsonOut    bool
 	model      string
+	noCache    bool
+	cacheTTL   time.Duration
 }
 
 type collector interface {
@@ -66,6 +70,8 @@ Safety:
 	f.BoolVar(&o.schemaOnly, "schema-only", false, "skip EXPLAIN; use schema + stats only")
 	f.BoolVar(&o.jsonOut, "json", false, "emit JSON instead of human-readable text")
 	f.StringVar(&o.model, "model", "claude-haiku-4-5-20251001", "Anthropic model id")
+	f.BoolVar(&o.noCache, "no-cache", false, "skip cache lookup and do not write a new entry")
+	f.DurationVar(&o.cacheTTL, "cache-ttl", 24*time.Hour, "how long a cached result remains valid")
 	_ = cmd.MarkFlagRequired("dsn")
 	return cmd
 }
@@ -104,6 +110,16 @@ func runAnalyze(ctx context.Context, in io.Reader, out io.Writer, o analyzeOpts)
 		return fmt.Errorf("collect context: %w", err)
 	}
 
+	cacheKey := cache.Key(pack)
+	if !o.noCache {
+		if cached, ok := cache.Lookup(cacheKey, o.cacheTTL); ok {
+			if !o.jsonOut {
+				fmt.Fprintln(out, "(from cache)")
+			}
+			return reportResult(out, pack, cached, o.jsonOut)
+		}
+	}
+
 	result, err := agent.Analyze(ctx, agent.Request{
 		APIKey:   apiKey,
 		Model:    o.model,
@@ -114,10 +130,11 @@ func runAnalyze(ctx context.Context, in io.Reader, out io.Writer, o analyzeOpts)
 		return fmt.Errorf("agent: %w", err)
 	}
 
-	if o.jsonOut {
-		return report.WriteJSON(out, pack, result)
+	if !o.noCache {
+		cache.Store(cacheKey, result, o.cacheTTL)
 	}
-	return report.WriteText(out, pack, result)
+
+	return reportResult(out, pack, result, o.jsonOut)
 }
 
 func resolveDialect(override, dsn string) (string, error) {
@@ -181,4 +198,11 @@ func readSQL(in io.Reader, o analyzeOpts) (string, error) {
 		return "", errors.New("no SQL provided: use --query, --file, or pipe via stdin")
 	}
 	return s, nil
+}
+
+func reportResult(out io.Writer, pack *target.ContextPack, result *agent.Result, jsonOut bool) error {
+	if jsonOut {
+		return report.WriteJSON(out, pack, result)
+	}
+	return report.WriteText(out, pack, result)
 }

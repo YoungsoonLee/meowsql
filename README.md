@@ -133,6 +133,17 @@ meowsql analyze --dsn "$DATABASE_URL" --file slow.sql --json
 | `--schema-only` | Skip `EXPLAIN`; use schema + stats only. Safe on prod read-replicas. |
 | `--json` | Machine-readable output. |
 | `--model` | Override the Claude model. Defaults to a fast/cheap one. |
+| `--no-cache` | Skip cache lookup and do not write a new entry. |
+| `--cache-ttl` | How long a cached result remains valid (default `24h`). |
+
+Results are cached in `~/.cache/meowsql/` (macOS: `~/Library/Caches/meowsql/`).
+The cache key is derived from the query text and the live schema (columns + indexes),
+so adding or dropping an index automatically invalidates the relevant entries.
+
+```bash
+meowsql cache dir    # print cache directory path
+meowsql cache clear  # delete all cached results
+```
 
 ---
 
@@ -346,7 +357,7 @@ turns that into a product.
 - [x] GitHub Action: comment on PRs when a migration or query changes a plan
       for the worse
 - [x] VS Code extension: inline "optimize this query" action
-- [ ] Query cache so repeated analyses are free
+- [x] Query cache so repeated analyses are free
 - [ ] `meowsql bench` — before/after timing harness
 
 ### Phase 3 — SaaS (MeowSQL Cloud)

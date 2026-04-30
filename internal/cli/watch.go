@@ -7,8 +7,10 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/YoungsoonLee/meowsql/internal/agent"
+	"github.com/YoungsoonLee/meowsql/internal/cache"
 	"github.com/YoungsoonLee/meowsql/internal/db/mysql"
 	"github.com/YoungsoonLee/meowsql/internal/db/postgres"
 	"github.com/YoungsoonLee/meowsql/internal/report"
@@ -23,6 +25,8 @@ type watchOpts struct {
 	minCalls int64
 	jsonOut  bool
 	model    string
+	noCache  bool
+	cacheTTL time.Duration
 }
 
 // watchStatement is the shared type returned by both dialect collectors.
@@ -59,6 +63,8 @@ Requires ANTHROPIC_API_KEY.`,
 	f.Int64Var(&o.minCalls, "min-calls", 10, "ignore queries seen fewer than this many times")
 	f.BoolVar(&o.jsonOut, "json", false, "emit JSON instead of human-readable text")
 	f.StringVar(&o.model, "model", "claude-haiku-4-5-20251001", "Anthropic model id")
+	f.BoolVar(&o.noCache, "no-cache", false, "skip cache lookup and do not write a new entry")
+	f.DurationVar(&o.cacheTTL, "cache-ttl", 24*time.Hour, "how long a cached result remains valid")
 	_ = cmd.MarkFlagRequired("dsn")
 	return cmd
 }
@@ -99,15 +105,31 @@ func runWatch(ctx context.Context, out io.Writer, o watchOpts) error {
 			continue
 		}
 
-		result, err := agent.Analyze(ctx, agent.Request{
-			APIKey:   apiKey,
-			Model:    o.model,
-			Context:  pack,
-			Validate: validate,
-		})
-		if err != nil {
-			fmt.Fprintf(out, "  [skip] agent failed: %v\n\n", err)
-			continue
+		var result *agent.Result
+		cacheKey := cache.Key(pack)
+		if !o.noCache {
+			if cached, ok := cache.Lookup(cacheKey, o.cacheTTL); ok {
+				if !o.jsonOut {
+					fmt.Fprintln(out, "  (from cache)")
+				}
+				result = cached
+			}
+		}
+
+		if result == nil {
+			result, err = agent.Analyze(ctx, agent.Request{
+				APIKey:   apiKey,
+				Model:    o.model,
+				Context:  pack,
+				Validate: validate,
+			})
+			if err != nil {
+				fmt.Fprintf(out, "  [skip] agent failed: %v\n\n", err)
+				continue
+			}
+			if !o.noCache {
+				cache.Store(cacheKey, result, o.cacheTTL)
+			}
 		}
 
 		if o.jsonOut {
