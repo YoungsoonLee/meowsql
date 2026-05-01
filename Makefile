@@ -1,5 +1,7 @@
-BIN := bin/meowsql
-PKG := ./cmd/meowsql
+BIN       := bin/meowsql
+CLOUD_BIN := bin/meowsql-cloud
+PKG       := ./cmd/meowsql
+CLOUD_PKG := ./cmd/meowsql-cloud
 
 E2E_DSN       := postgres://meowsql:meowsql@localhost:55432/meowsql?sslmode=disable
 E2E_MYSQL_DSN := mysql://meowsql:meowsql@localhost:53306/meowsql
@@ -7,15 +9,36 @@ PSQL          := docker compose exec -T postgres psql -U meowsql -d meowsql -v O
 MYSQL         := docker compose exec -T mysql mysql -umeowsql -pmeowsql meowsql
 MYSQL_ROOT    := docker compose exec -T mysql mysql -uroot -pmeowsql
 
-.PHONY: build run test tidy fmt vet clean \
+.PHONY: build build-cloud run test tidy fmt vet clean \
+        cloud-up cloud-down cloud-keygen cloud-serve \
         e2e e2e-up e2e-wait e2e-seed e2e-run e2e-explain e2e-down \
         e2e-mysql e2e-mysql-up e2e-mysql-wait e2e-mysql-seed e2e-mysql-run e2e-mysql-explain e2e-mysql-down
 
 build:
 	CGO_ENABLED=1 go build -o $(BIN) $(PKG)
 
+build-cloud:
+	CGO_ENABLED=0 go build -o $(CLOUD_BIN) $(CLOUD_PKG)
+
 run:
 	CGO_ENABLED=1 go run $(PKG) $(ARGS)
+
+# -------- MeowSQL Cloud (Phase 3a) --------
+
+CLOUD_DB_URL ?= postgres://meowsql:meowsql@localhost:55433/meowsql_cloud?sslmode=disable
+
+cloud-up:
+	docker compose up -d cloud-db
+	@echo "Cloud DB ready on :55433"
+
+cloud-down:
+	docker compose rm -sfv cloud-db
+
+cloud-keygen: build-cloud
+	DATABASE_URL="$(CLOUD_DB_URL)" ./$(CLOUD_BIN) keygen --label "$(LABEL)"
+
+cloud-serve: build-cloud
+	DATABASE_URL="$(CLOUD_DB_URL)" ./$(CLOUD_BIN) serve
 
 test:
 	go test ./...

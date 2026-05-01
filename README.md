@@ -410,6 +410,128 @@ Example output:
 
 ---
 
+## `meowsql push` — continuous monitoring (MeowSQL Cloud)
+
+`push` is the bridge between your database and MeowSQL Cloud. It runs the same
+analysis as `watch`, then streams results to the cloud API for persistent
+storage, dashboards, and alerting — automatically, on a schedule.
+
+### How the measurements work
+
+A common question: does MeowSQL need to execute queries against my production
+database to get accurate numbers?
+
+**No. And that's the point.**
+
+```
+[Inside your database]
+  Real user queries execute normally
+          ↓
+  Your DB engine records execution stats automatically:
+    PostgreSQL → pg_stat_statements (cumulative since last reset)
+    MySQL 8    → performance_schema.events_statements_summary_by_digest
+
+  meowsql push reads this telemetry (SELECT only, read-only session)
+          ↓
+  Normalized query text + stats + AI analysis ──▶ MeowSQL Cloud
+```
+
+MeowSQL never re-executes your slow queries. Instead it reads the statistics
+your database has already accumulated from **real production traffic** — often
+millions of executions. That makes the numbers more accurate than any synthetic
+benchmark, because they reflect your actual data distribution, cache state, and
+concurrent load.
+
+| What MeowSQL accesses | How |
+|---|---|
+| Execution stats (calls, mean ms, total ms) | `SELECT` from `pg_stat_statements` / `performance_schema` |
+| Schema (columns, indexes, table sizes) | `SELECT` from `pg_catalog` / `information_schema` |
+| Actual row data | ❌ Never |
+| Your DSN / credentials | ❌ Never sent to cloud — stays on your machine |
+
+### Architecture
+
+```
+[Your infrastructure]              [MeowSQL Cloud]
+  DB ──(read-only SELECT)──▶
+  meowsql push                ──▶  POST /v1/ingest  ──▶  cloud-db
+  (runs on your side)              (meowsql-cloud)        ↓
+                                                     dashboards
+                                                     alerts
+```
+
+`meowsql push` is the only process that touches your database. The cloud server
+never receives a connection string and never opens a connection to your DB.
+
+### Usage
+
+```bash
+# Run once
+export ANTHROPIC_API_KEY=sk-ant-...
+export MEOWSQL_API_KEY=msk_...
+meowsql push --dsn "$DATABASE_URL"
+
+# Run every hour (drop into cron or a systemd unit)
+meowsql push --dsn "$DATABASE_URL" --interval 1h
+
+# MySQL
+meowsql push --dsn "mysql://user:pass@host:3306/db" --interval 1h
+
+# Preview what would be sent without connecting
+meowsql push --dsn "$DATABASE_URL" --dry-run
+```
+
+### `push` flags
+
+| Flag | What it does |
+|------|-------------|
+| `--dsn` | Database connection string (required). |
+| `--dialect` | Force `postgres` or `mysql` when the DSN is ambiguous. |
+| `--top` | Number of slowest queries to analyze per cycle (default 5). |
+| `--min-calls` | Skip queries seen fewer than N times (default 10). |
+| `--interval` | Repeat on this schedule (e.g. `1h`); `0` = run once. |
+| `--endpoint` | MeowSQL Cloud API base URL (default `https://api.meowsql.dev`). |
+| `--api-key` | Cloud API key (or set `MEOWSQL_API_KEY`). |
+| `--timeout` | Per-query timeout for schema + analysis (default `60s`). |
+| `--model` | Claude model override. |
+| `--no-cache` | Skip local analysis cache. |
+| `--dry-run` | Analyze locally and print without sending to the cloud. |
+
+### Self-hosting MeowSQL Cloud
+
+The `meowsql-cloud` binary in this repo is the full cloud server. Run it
+yourself if you need data to stay entirely within your own infrastructure
+(regulated workloads, air-gapped environments).
+
+```bash
+# Start the cloud database
+docker compose up -d cloud-db   # Postgres on :55433
+
+# Generate an API key (shown once — store it securely)
+make cloud-keygen LABEL=production
+# → msk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+# Start the server
+make cloud-serve                # listens on :8080
+
+# Point the push agent at your self-hosted server
+meowsql push \
+  --dsn "$DATABASE_URL" \
+  --endpoint "http://localhost:8080" \
+  --api-key "msk_..." \
+  --interval 1h
+```
+
+API endpoints exposed by `meowsql-cloud`:
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/v1/health` | Health check (no auth) |
+| `POST` | `/v1/ingest` | Receive a push payload |
+| `GET` | `/v1/queries` | List queries sorted by cost |
+
+---
+
 ## VS Code Extension
 
 The `vscode-meowsql` extension adds an inline **"🐾 Optimize with MeowSQL"** CodeLens
@@ -507,11 +629,15 @@ turns that into a product.
 
 ### Phase 3 — SaaS (MeowSQL Cloud)
 
-- [ ] Hosted continuous monitoring against pg_stat_statements / P_S
+- [x] `meowsql push` — agent that reads DB telemetry locally and streams
+      results to the cloud (credentials never leave your machine)
+- [x] `meowsql-cloud` — self-hostable API server (`serve`, `keygen`, `keys`)
+- [x] `POST /v1/ingest` + `GET /v1/queries` cloud API
 - [ ] Cost dashboard: dollars and seconds burned per query family
+- [ ] Regression alerts: Slack / email when a query degrades week-over-week
 - [ ] Slack / Teams digests: "your 5 most expensive queries this week"
-- [ ] Multi-tenant, SSO, audit log
-- [ ] Optional self-hosted edition for regulated workloads
+- [ ] Multi-tenant web UI, SSO, audit log
+- [ ] Hosted version at api.meowsql.dev
 
 Why this order: the CLI proves the wedge. The developer-workflow layer creates
 daily surface area on a team. The SaaS layer is where the recurring revenue
@@ -542,17 +668,19 @@ daily surface area on a team. The SaaS layer is where the recurring revenue
 ## Project Layout
 
 ```
-cmd/meowsql/            thin CLI entry point
-internal/cli/           cobra commands (root, analyze)
+cmd/meowsql/            CLI binary (analyze, watch, bench, plan-diff, push, cache)
+cmd/meowsql-cloud/      Cloud server binary (serve, keygen, keys)
+internal/cli/           cobra commands
 internal/db/postgres/   connect, parse (pg_query_go), EXPLAIN, schema, stats
+internal/db/mysql/      connect, parse (pingcap/tidb), EXPLAIN, schema, stats
 internal/agent/         Claude prompt + HTTP client, JSON result decoding
 internal/report/        pretty terminal + JSON renderers
+internal/push/          wire types + HTTP client shared between CLI and server
+internal/cloud/         cloud API handlers + Postgres store (for meowsql-cloud)
+internal/cache/         disk-based result cache (SHA256 key, TTL expiry)
+internal/target/        dialect-agnostic types (ContextPack, BenchOptions, …)
 testdata/examples/      sample slow queries used in demos
 vscode-meowsql/         VS Code extension (TypeScript)
-  src/extension.ts      activation, command registration
-  src/codelens.ts       CodeLens provider — detects SQL statements
-  src/runner.ts         spawns meowsql binary, parses JSON output
-  src/panel.ts          WebviewPanel renderer for results
 ```
 
 ## Development

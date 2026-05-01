@@ -15,5 +15,6 @@ func NewRoot(version string) *cobra.Command {
 	cmd.AddCommand(newPlanDiffCmd())
 	cmd.AddCommand(newBenchCmd())
 	cmd.AddCommand(newCacheCmd())
+	cmd.AddCommand(newPushCmd())
 	return cmd
 }
